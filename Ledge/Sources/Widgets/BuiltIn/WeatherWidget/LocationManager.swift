@@ -1,4 +1,5 @@
 import CoreLocation
+import MapKit
 import os.log
 
 /// Manages CoreLocation for auto-detecting user's location.
@@ -35,9 +36,16 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             self.longitude = location.coordinate.longitude
 
             // Reverse geocode for display name
-            let geocoder = CLGeocoder()
-            if let placemark = try? await geocoder.reverseGeocodeLocation(location).first {
-                self.locationName = placemark.locality ?? placemark.administrativeArea ?? "Unknown"
+            if #available(macOS 26, *) {
+                if let request = MKReverseGeocodingRequest(location: location),
+                   let item = try? await request.mapItems.first {
+                    self.locationName = item.name ?? "Unknown"
+                }
+            } else {
+                let geocoder = CLGeocoder()
+                if let placemark = try? await geocoder.reverseGeocodeLocation(location).first {
+                    self.locationName = placemark.locality ?? placemark.administrativeArea ?? "Unknown"
+                }
             }
         }
     }

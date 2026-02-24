@@ -35,6 +35,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - App Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Skip all hardware/permission work when running under XCTest.
+        // The test runner gets killed if we trigger Accessibility prompts
+        // or try to create CGEventTaps.
+        guard !AppEnvironment.isTesting else {
+            logger.info("Ledge launched in test environment — skipping hardware init")
+            return
+        }
+
         logger.info("Ledge starting up...")
 
         // Register all built-in widgets
@@ -47,32 +55,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         displayManager.detectXenonEdge()
 
         if displayManager.xeneonScreen != nil {
-            // Determine which permissions active widgets need. Request them
-            // upfront so system dialogs are dismissed before the fullscreen
-            // transition — this prevents dialogs from interfering with the
-            // menu-bar-hiding fullscreen helper.
-            let requiredPerms = requiredWidgetPermissions()
-
-            displayManager.showPanelWhenReady(requiredPermissions: requiredPerms) { [weak self] in
+            // Request Accessibility permission early — before the fullscreen transition.
+            // The system dialog must appear BEFORE the fullscreen helper covers the Edge,
+            // otherwise it gets hidden behind the fullscreen Space.
+            displayManager.ensureAccessibilityPermission { [weak self] in
                 guard let self else { return }
 
-                // Configure panel transparency for blur/image backgrounds
-                self.configurePanelTransparency()
+                // Now determine which widget permissions are needed and gate on those too.
+                let requiredPerms = self.requiredWidgetPermissions()
 
-                let dashboardView = DashboardView(
-                    layoutManager: self.layoutManager,
-                    configStore: self.configStore,
-                    registry: WidgetRegistry.shared
-                )
-                .environmentObject(self.displayManager)
-                .environment(self.themeManager)
-                self.displayManager.setPanelContent(dashboardView)
+                self.displayManager.showPanelWhenReady(requiredPermissions: requiredPerms) { [weak self] in
+                    guard let self else { return }
 
-                // Start touch remapper — suppresses wrongly-mapped mouse events from the
-                // Edge touchscreen and posts synthetic events at the correct Edge position.
-                self.displayManager.startTouchRemapper()
+                    // Configure panel transparency for blur/image backgrounds
+                    self.configurePanelTransparency()
 
-                self.logger.info("Panel displayed on Xeneon Edge")
+                    // Load the macOS desktop wallpaper for the Edge as a fallback background.
+                    // In fullscreen mode the desktop is hidden, so we capture the wallpaper
+                    // to use when no custom background image is configured.
+                    if let screen = self.displayManager.xeneonScreen {
+                        self.themeManager.loadDesktopWallpaper(for: screen)
+                    }
+
+                    let dashboardView = DashboardView(
+                        layoutManager: self.layoutManager,
+                        configStore: self.configStore,
+                        registry: WidgetRegistry.shared
+                    )
+                    .environmentObject(self.displayManager)
+                    .environment(self.themeManager)
+                    self.displayManager.setPanelContent(dashboardView)
+
+                    // Start touch remapper — Accessibility is already granted at this point.
+                    self.displayManager.startTouchRemapper()
+
+                    self.logger.info("Panel displayed on Xeneon Edge")
+                }
             }
         } else {
             logger.warning("Xeneon Edge not found on launch — panel not shown")
@@ -126,15 +144,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Find the settings window created by the SwiftUI Window scene.
-        // It's the titled, non-panel window.
-        for window in NSApp.windows {
-            if window.styleMask.contains(.titled)
-                && !(window is LedgePanel)
-                && !(window is FullscreenHelperWindow) {
-                window.makeKeyAndOrderFront(nil)
-                return
+        if let window = findSettingsWindow() {
+            // Prevent SwiftUI from releasing the window when it's closed —
+            // otherwise it won't be in NSApp.windows next time we look.
+            window.isReleasedWhenClosed = false
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            // Window may not exist yet (SwiftUI released it after close, or
+            // activation hasn't finished). Retry after a short delay to give
+            // the SwiftUI Window scene time to create/register it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                if let window = self?.findSettingsWindow() {
+                    window.isReleasedWhenClosed = false
+                    window.makeKeyAndOrderFront(nil)
+                } else {
+                    self?.logger.warning("Settings window not found — attempting scene open")
+                    // As a last resort, toggle activation to nudge SwiftUI into
+                    // re-creating the Window scene, then try once more.
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        if let window = self?.findSettingsWindow() {
+                            window.isReleasedWhenClosed = false
+                            window.makeKeyAndOrderFront(nil)
+                        } else {
+                            self?.logger.error("Settings window could not be found or created")
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Locate the SwiftUI-created settings window among all app windows.
+    private func findSettingsWindow() -> NSWindow? {
+        NSApp.windows.first { window in
+            window.styleMask.contains(.titled)
+            && !(window is LedgePanel)
+            && !(window is FullscreenHelperWindow)
         }
     }
 
@@ -142,6 +189,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Watch for the settings window being closed so we can hide from CMD+TAB.
     private func observeSettingsWindow() {
+        // Pin the settings window the moment it appears so SwiftUI won't
+        // release it when closed — this ensures showSettings() can always find it.
+        let appearObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let window = notification.object as? NSWindow else { return }
+            if window.styleMask.contains(.titled)
+                && !(window is LedgePanel)
+                && !(window is FullscreenHelperWindow) {
+                window.isReleasedWhenClosed = false
+                self?.logger.debug("Settings window pinned (isReleasedWhenClosed = false)")
+            }
+        }
+        windowObservers.append(appearObserver)
+
         // Observe any window closing — check if it was the settings window
         let closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -213,7 +277,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// desktop wallpaper or background image shows through gaps between widgets.
     /// Solid mode keeps the panel opaque for best performance.
     private func configurePanelTransparency() {
-        let needsTransparency = themeManager.widgetBackgroundStyle != .solid
+        // Respect the theme's preferred background style (e.g. Liquid Glass → .blur)
+        // before falling back to the user's manual setting.
+        let effectiveStyle = themeManager.resolvedTheme.preferredBackgroundStyle
+            ?? themeManager.widgetBackgroundStyle
+        let needsTransparency = effectiveStyle != .solid
         displayManager.panel?.setTransparent(needsTransparency)
     }
 

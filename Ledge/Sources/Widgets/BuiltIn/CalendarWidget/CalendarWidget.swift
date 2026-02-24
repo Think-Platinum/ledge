@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Calendar widget showing upcoming events from macOS calendars.
 ///
@@ -39,6 +40,9 @@ struct CalendarWidgetView: View {
 
     @State private var config = CalendarWidget.Config()
     @State private var eventManager = EventKitManager()
+    @State private var currentMeetingColor: Color? = nil
+
+    private let meetingCheckTimer = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -102,13 +106,26 @@ struct CalendarWidgetView: View {
                 }
             }
         }
+        .background(
+            // When in a meeting, tint the widget background with the calendar colour
+            Group {
+                if let meetingColor = currentMeetingColor {
+                    meetingColor.opacity(0.15)
+                }
+            }
+        )
         .onAppear {
             loadConfig()
             eventManager.requestAccess()
+            checkCurrentMeeting()
+        }
+        .onReceive(meetingCheckTimer) { _ in
+            checkCurrentMeeting()
         }
         .onReceive(configStore.configDidChange) { changedID in
             if changedID == instanceID { loadConfig() }
         }
+        .animation(.easeInOut(duration: 0.6), value: currentMeetingColor != nil)
     }
 
     private var filteredEvents: [EventKitManager.CalendarEvent] {
@@ -133,30 +150,38 @@ struct CalendarWidgetView: View {
             .map { DayGroup(date: $0.key, events: $0.value) }
     }
 
+    /// Whether an event is currently happening right now.
+    private func isEventActive(_ event: EventKitManager.CalendarEvent) -> Bool {
+        let now = Date()
+        return !event.isAllDay && event.startDate <= now && event.endDate > now
+    }
+
     private func eventRow(_ event: EventKitManager.CalendarEvent) -> some View {
-        HStack(spacing: 10) {
-            // Calendar color indicator — stretches to match event row height
-            // Wrapped in a container to prevent .fill() from leaking foregroundStyle
-            RoundedRectangle(cornerRadius: 2)
-                .fill(event.calendarColor.map { Color(cgColor: $0) } ?? .blue)
+        let calColor = event.calendarColor.map { Color(cgColor: $0) } ?? .blue
+        let active = isEventActive(event)
+
+        return HStack(spacing: 10) {
+            // Calendar color indicator — use Color view + clipShape instead of
+            // Shape.fill() to prevent foregroundStyle from leaking to sibling views
+            calColor
                 .frame(width: 4)
-                .compositingGroup()
+                .clipShape(RoundedRectangle(cornerRadius: 2))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(event.title)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(theme.primaryText)
+                    .font(.system(size: 18, weight: active ? .semibold : .medium))
+                    .foregroundColor(active ? calColor : theme.primaryText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if event.isAllDay {
                     Text("All day")
                         .font(.system(size: 15))
-                        .foregroundStyle(theme.tertiaryText)
+                        .foregroundColor(theme.tertiaryText)
                 } else {
                     Text("\(event.startDate, format: .dateTime.hour().minute()) – \(event.endDate, format: .dateTime.hour().minute())")
                         .font(.system(size: 15, design: .monospaced))
-                        .foregroundStyle(theme.tertiaryText)
+                        .foregroundColor(active ? calColor.opacity(0.7) : theme.tertiaryText)
                 }
             }
 
@@ -164,6 +189,7 @@ struct CalendarWidgetView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 4)
+        .background(active ? calColor.opacity(0.08) : Color.clear)
     }
 
     private func dayLabel(_ date: Date) -> String {
@@ -172,6 +198,18 @@ struct CalendarWidgetView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEEE, MMM d"
         return formatter.string(from: date).uppercased()
+    }
+
+    /// Check if any non-all-day event is happening right now.
+    /// If so, tint the entire Calendar widget background with that event's calendar colour.
+    private func checkCurrentMeeting() {
+        let now = Date()
+        if let activeEvent = eventManager.events.first(where: { !$0.isAllDay && $0.startDate <= now && $0.endDate > now }),
+           let cgColor = activeEvent.calendarColor {
+            currentMeetingColor = Color(cgColor: cgColor)
+        } else {
+            currentMeetingColor = nil
+        }
     }
 
     private func loadConfig() {

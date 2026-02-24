@@ -1,5 +1,5 @@
 import XCTest
-@testable import Ledge
+import AppKit
 
 /// Unit tests for the pure coordinate transformation functions in TouchCoordinateMath.
 ///

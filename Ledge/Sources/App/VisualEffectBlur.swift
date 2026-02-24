@@ -8,9 +8,15 @@ import AppKit
 ///
 /// Usage:
 /// ```swift
-/// VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow)
+/// VisualEffectBlur(material: .hudWindow, blendingMode: .withinWindow)
 ///     .clipShape(RoundedRectangle(cornerRadius: 12))
 /// ```
+///
+/// **Blending modes:**
+/// - `.withinWindow` — blurs sibling content rendered behind this view in the same
+///   window (e.g. a wallpaper image in the dashboard). Use this for widget backgrounds.
+/// - `.behindWindow` — blurs content behind the window itself. Unreliable in
+///   fullscreen mode because the fullscreen helper window is opaque black.
 struct VisualEffectBlur: NSViewRepresentable {
 
     let material: NSVisualEffectView.Material
@@ -19,7 +25,7 @@ struct VisualEffectBlur: NSViewRepresentable {
 
     init(
         material: NSVisualEffectView.Material = .hudWindow,
-        blendingMode: NSVisualEffectView.BlendingMode = .behindWindow,
+        blendingMode: NSVisualEffectView.BlendingMode = .withinWindow,
         state: NSVisualEffectView.State = .active
     ) {
         self.material = material

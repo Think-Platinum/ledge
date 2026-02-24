@@ -153,6 +153,17 @@ final class TouchFlightRecorder: @unchecked Sendable {
         }
     }
 
+    /// Update the delivery latency for the most recent entry matching the given sequence ID.
+    /// Called from the panel's delivery confirmation callback to measure CGEventTap → sendEvent delay.
+    func updateLatency(sequenceID: UInt64, latencyMs: Double) {
+        lock.withLock { state in
+            // Search from the end (most recent) since the matching entry is almost always the last one
+            if let index = state.buffer.lastIndex(where: { $0.sequenceID == sequenceID }) {
+                state.buffer[index].deliveryLatencyMs = latencyMs
+            }
+        }
+    }
+
     /// Clear all recorded data. Thread-safe.
     func clearAll() {
         lock.withLock { state in

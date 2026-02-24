@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI  // For Array.move(fromOffsets:toOffset:) used in page reordering
 import os.log
 
 /// Manages the active widget layout and persists layouts to disk.
@@ -26,6 +27,28 @@ class LayoutManager {
 
     /// Total number of pages (saved layouts).
     var pageCount: Int { savedLayouts.count }
+
+    // MARK: - Auto-Rotation
+
+    /// Whether pages automatically rotate on a timer.
+    var autoRotateEnabled: Bool = false {
+        didSet {
+            saveKey(autoRotateEnabledKey, value: autoRotateEnabled)
+            if autoRotateEnabled { startAutoRotation() } else { stopAutoRotation() }
+        }
+    }
+
+    /// Interval in seconds between automatic page changes.
+    var autoRotateInterval: TimeInterval = 30 {
+        didSet {
+            saveKey(autoRotateIntervalKey, value: autoRotateInterval)
+            if autoRotateEnabled { startAutoRotation() }  // restart with new interval
+        }
+    }
+
+    private var autoRotateTimer: Timer?
+    private let autoRotateEnabledKey = "com.ledge.autoRotateEnabled"
+    private let autoRotateIntervalKey = "com.ledge.autoRotateInterval"
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -64,6 +87,15 @@ class LayoutManager {
         // launch (since WidgetLayout.defaultLayout creates new UUIDs), orphaning
         // any saved widget configs.
         save()
+
+        // Restore auto-rotation settings
+        if UserDefaults.standard.object(forKey: autoRotateEnabledKey) != nil {
+            autoRotateEnabled = UserDefaults.standard.bool(forKey: autoRotateEnabledKey)
+        }
+        let savedInterval = UserDefaults.standard.double(forKey: autoRotateIntervalKey)
+        if savedInterval > 0 { autoRotateInterval = savedInterval }
+
+        if autoRotateEnabled { startAutoRotation() }
     }
 
     // MARK: - Widget Management
@@ -136,15 +168,42 @@ class LayoutManager {
         saveSavedLayouts()
     }
 
-    /// Create a new layout with the given name (copies current as starting point).
+    /// Create a new empty layout with the given name.
+    /// Uses the same grid dimensions as the active layout but starts with no widgets.
     func createLayout(name: String) -> WidgetLayout {
-        var layout = activeLayout
-        layout = WidgetLayout(
+        let layout = WidgetLayout(
             id: UUID(),
             name: name,
             columns: activeLayout.columns,
             rows: activeLayout.rows,
-            placements: activeLayout.placements
+            placements: [],  // Empty — user adds widgets to the new page
+            backgroundImagePath: nil
+        )
+        savedLayouts.append(layout)
+        saveSavedLayouts()
+        return layout
+    }
+
+    /// Create a new layout by duplicating an existing one.
+    func duplicateLayout(_ source: WidgetLayout, name: String) -> WidgetLayout {
+        let layout = WidgetLayout(
+            id: UUID(),
+            name: name,
+            columns: source.columns,
+            rows: source.rows,
+            placements: source.placements.map { p in
+                // New UUIDs for each placement so widget configs are independent
+                WidgetPlacement(
+                    id: UUID(),
+                    widgetTypeID: p.widgetTypeID,
+                    column: p.column,
+                    row: p.row,
+                    columnSpan: p.columnSpan,
+                    rowSpan: p.rowSpan,
+                    configuration: p.configuration
+                )
+            },
+            backgroundImagePath: source.backgroundImagePath
         )
         savedLayouts.append(layout)
         saveSavedLayouts()
@@ -159,6 +218,58 @@ class LayoutManager {
         }
         savedLayouts.removeAll { $0.id == id }
         saveSavedLayouts()
+    }
+
+    // MARK: - Auto-Rotation
+
+    private func startAutoRotation() {
+        stopAutoRotation()
+        guard savedLayouts.count > 1 else { return }
+        autoRotateTimer = Timer.scheduledTimer(withTimeInterval: autoRotateInterval, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    self?.nextPage()
+                }
+            }
+        }
+        logger.info("Auto-rotation started: \(self.autoRotateInterval)s interval")
+    }
+
+    private func stopAutoRotation() {
+        autoRotateTimer?.invalidate()
+        autoRotateTimer = nil
+    }
+
+    /// Reset the auto-rotation timer (e.g. after a manual swipe).
+    func resetAutoRotationTimer() {
+        if autoRotateEnabled { startAutoRotation() }
+    }
+
+    /// Restart auto-rotation if enabled (e.g. after adding/removing pages).
+    private func restartAutoRotationIfNeeded() {
+        if autoRotateEnabled { startAutoRotation() }
+    }
+
+    // MARK: - Page Reordering
+
+    /// Move a page from one index to another.
+    func movePage(from source: IndexSet, to destination: Int) {
+        savedLayouts.move(fromOffsets: source, toOffset: destination)
+        saveSavedLayouts()
+    }
+
+    /// Rename a saved layout.
+    func renameLayout(id: UUID, to newName: String) {
+        if let index = savedLayouts.firstIndex(where: { $0.id == id }) {
+            savedLayouts[index].name = newName
+            if activeLayout.id == id { activeLayout.name = newName }
+            saveSavedLayouts()
+            save()
+        }
+    }
+
+    private func saveKey(_ key: String, value: some Any) {
+        UserDefaults.standard.set(value, forKey: key)
     }
 
     // MARK: - Migration
@@ -182,7 +293,8 @@ class LayoutManager {
                     rowSpan: p.rowSpan * scale,
                     configuration: p.configuration
                 )
-            }
+            },
+            backgroundImagePath: layout.backgroundImagePath
         )
     }
 

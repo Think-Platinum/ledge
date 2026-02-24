@@ -3,8 +3,11 @@ import Combine
 
 /// Spotify widget showing current playback with album art and controls.
 ///
-/// Uses AppleScript to communicate with the Spotify desktop app locally.
-/// No authentication required — just needs Spotify to be running.
+/// Supports two data sources:
+/// - **AppleScript** (default) — talks to the local Spotify desktop app. No auth needed.
+/// - **Spotify Web API** — uses OAuth PKCE for cross-device playback state and control.
+///   Shows which device is playing (phone, speaker, etc.) and can transfer playback.
+///   Requires a Spotify Client ID from developer.spotify.com.
 struct SpotifyWidget {
 
     struct Config: Codable, Equatable {
@@ -12,6 +15,8 @@ struct SpotifyWidget {
         var showProgressBar: Bool = true
         var showAlbumColors: Bool = true
         var showSkipButtons: Bool = true
+        var useWebAPI: Bool = false
+        var spotifyClientID: String = ""
     }
 
     static let descriptor = WidgetDescriptor(
@@ -43,6 +48,8 @@ struct SpotifyWidgetView: View {
     @State private var config = SpotifyWidget.Config()
     private let bridge = SpotifyBridge()
     private let colorExtractor = AlbumColorExtractor()
+    @StateObject private var authManager = SpotifyAuthManager()
+    @State private var webAPI: SpotifyWebAPI?
     @State private var state = SpotifyBridge.PlaybackState()
     @State private var isSpotifyRunning = false
     @State private var albumColors: AlbumColorExtractor.Colors?
@@ -56,6 +63,15 @@ struct SpotifyWidgetView: View {
     /// Guards against overlapping refresh tasks. If a previous Task.detached
     /// AppleScript call hasn't finished when the timer fires again, skip the poll.
     @State private var isRefreshing = false
+    /// Name of the Spotify device currently playing (from Web API).
+    @State private var deviceName: String = ""
+    /// Type of the Spotify device (e.g. "Computer", "Smartphone") for icon.
+    @State private var deviceType: String = ""
+
+    /// Whether the Web API data source is active and authenticated.
+    private var useWebAPI: Bool {
+        config.useWebAPI && authManager.isAuthenticated
+    }
 
     private let pollTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let positionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -72,6 +88,7 @@ struct SpotifyWidgetView: View {
         }
         .onAppear {
             loadConfig()
+            configureWebAPI()
             refreshState()
             // Re-extract colours if we have artwork but lost the colours
             // (can happen when the view hierarchy rebuilds due to theme/env changes)
@@ -158,6 +175,9 @@ struct SpotifyWidgetView: View {
                     color: .white.opacity(0.6),
                     trigger: state.artistName
                 )
+                if !deviceName.isEmpty {
+                    deviceLabel(fontSize: 10)
+                }
             }
             .frame(minWidth: 80)
 
@@ -166,18 +186,18 @@ struct SpotifyWidgetView: View {
             // Just basic playback controls — no progress, no volume
             // Sized for touch targets (min 44pt tap area)
             HStack(spacing: 20) {
-                Button { bridge.previousTrack(); refreshAfterDelay() } label: {
+                Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                Button { bridge.playPause(); refreshAfterDelay() } label: {
+                Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                Button { bridge.nextTrack(); refreshAfterDelay() } label: {
+                Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 18))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
@@ -232,6 +252,9 @@ struct SpotifyWidgetView: View {
                         color: .white.opacity(0.4),
                         trigger: state.albumName
                     )
+                    if !deviceName.isEmpty {
+                        deviceLabel(fontSize: 11)
+                    }
                 }
 
                 Spacer(minLength: 4)
@@ -258,32 +281,32 @@ struct SpotifyWidgetView: View {
 
             // Centered playback controls — sized for touch (min 44pt tap area)
             HStack(spacing: 20) {
-                Button { bridge.previousTrack(); refreshAfterDelay() } label: {
+                Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 if config.showSkipButtons {
-                    Button { bridge.skipBackward(10); refreshAfterDelay() } label: {
+                    Button { doSkipBackward(10) } label: {
                         Image(systemName: "gobackward.10").font(.system(size: 16))
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                     }
                 }
-                Button { bridge.playPause(); refreshAfterDelay() } label: {
+                Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 30))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 if config.showSkipButtons {
-                    Button { bridge.skipForward(10); refreshAfterDelay() } label: {
+                    Button { doSkipForward(10) } label: {
                         Image(systemName: "goforward.10").font(.system(size: 16))
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                     }
                 }
-                Button { bridge.nextTrack(); refreshAfterDelay() } label: {
+                Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 18))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
@@ -302,7 +325,7 @@ struct SpotifyWidgetView: View {
                 Slider(
                     value: Binding(
                         get: { Double(state.volume) },
-                        set: { state.volume = Int($0); bridge.setVolume(Int($0)) }
+                        set: { state.volume = Int($0); doSetVolume(Int($0)) }
                     ),
                     in: 0...100
                 )
@@ -368,6 +391,9 @@ struct SpotifyWidgetView: View {
                         color: .white.opacity(0.5),
                         trigger: state.albumName
                     )
+                    if !deviceName.isEmpty {
+                        deviceLabel(fontSize: 12)
+                    }
                 }
 
                 Spacer()
@@ -415,8 +441,9 @@ struct SpotifyWidgetView: View {
                         }
                         .onEnded { value in
                             let fraction = max(0, min(value.location.x / barWidth, 1.0))
-                            bridge.setPosition(fraction * state.trackDuration)
-                            state.playerPosition = fraction * state.trackDuration
+                            let position = fraction * state.trackDuration
+                            doSeek(position)
+                            state.playerPosition = position
                             isSeeking = false
                         }
                 )
@@ -441,32 +468,32 @@ struct SpotifyWidgetView: View {
 
             // Centered playback controls — larger touch targets
             HStack(spacing: 24) {
-                Button { bridge.previousTrack(); refreshAfterDelay() } label: {
+                Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 22))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 if config.showSkipButtons {
-                    Button { bridge.skipBackward(10); refreshAfterDelay() } label: {
+                    Button { doSkipBackward(10) } label: {
                         Image(systemName: "gobackward.10").font(.system(size: 20))
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                     }
                 }
-                Button { bridge.playPause(); refreshAfterDelay() } label: {
+                Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 36))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 if config.showSkipButtons {
-                    Button { bridge.skipForward(10); refreshAfterDelay() } label: {
+                    Button { doSkipForward(10) } label: {
                         Image(systemName: "goforward.10").font(.system(size: 20))
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                     }
                 }
-                Button { bridge.nextTrack(); refreshAfterDelay() } label: {
+                Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 22))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
@@ -485,7 +512,7 @@ struct SpotifyWidgetView: View {
                 Slider(
                     value: Binding(
                         get: { Double(state.volume) },
-                        set: { state.volume = Int($0); bridge.setVolume(Int($0)) }
+                        set: { state.volume = Int($0); doSetVolume(Int($0)) }
                     ),
                     in: 0...100
                 )
@@ -639,21 +666,23 @@ struct SpotifyWidgetView: View {
             Image(systemName: "music.note")
                 .font(.system(size: 32))
                 .foregroundColor(theme.tertiaryText)
-            Text("Spotify Not Running")
+            Text(useWebAPI ? "No Active Device" : "Spotify Not Running")
                 .font(.system(size: 14))
                 .foregroundColor(theme.tertiaryText)
-            Button {
-                bridge.activateSpotify()
-            } label: {
-                Text("Open Spotify")
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .background(theme.primaryText.opacity(0.1))
-                    .clipShape(Capsule())
+            if !useWebAPI {
+                Button {
+                    bridge.activateSpotify()
+                } label: {
+                    Text("Open Spotify")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(theme.primaryText.opacity(0.1))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -667,8 +696,7 @@ struct SpotifyWidgetView: View {
                 .font(.system(size: 14))
                 .foregroundColor(theme.tertiaryText)
             Button {
-                bridge.playPause()
-                refreshAfterDelay()
+                doPlayPause()
             } label: {
                 Image(systemName: "play.fill")
                     .font(.system(size: 24))
@@ -684,6 +712,122 @@ struct SpotifyWidgetView: View {
         if state.volume < 33 { return "speaker.wave.1.fill" }
         if state.volume < 66 { return "speaker.wave.2.fill" }
         return "speaker.wave.3.fill"
+    }
+
+    // MARK: - Device Label
+
+    /// Shows "Playing on [device]" with an appropriate SF Symbol icon.
+    private func deviceLabel(fontSize: CGFloat) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: deviceSystemImage)
+                .font(.system(size: fontSize - 1))
+            Text("Playing on \(deviceName)")
+                .font(.system(size: fontSize))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.green.opacity(0.7))
+        .padding(.top, 1)
+    }
+
+    /// SF Symbol for the current device type.
+    private var deviceSystemImage: String {
+        switch deviceType.lowercased() {
+        case "computer": return "laptopcomputer"
+        case "smartphone": return "iphone"
+        case "speaker": return "hifispeaker"
+        case "tv": return "tv"
+        case "tablet": return "ipad"
+        case "automobile": return "car"
+        case "castaudio", "castdevice": return "airplayaudio"
+        default: return "speaker.wave.2"
+        }
+    }
+
+    // MARK: - Playback Control Wrappers
+
+    /// Play/pause — routes through Web API when active, otherwise AppleScript.
+    private func doPlayPause() {
+        if useWebAPI, let api = webAPI {
+            Task {
+                do {
+                    if state.isPlaying {
+                        try await api.pause()
+                    } else {
+                        try await api.play()
+                    }
+                } catch {}
+                refreshAfterDelay()
+            }
+        } else {
+            bridge.playPause()
+            refreshAfterDelay()
+        }
+    }
+
+    private func doNextTrack() {
+        if useWebAPI, let api = webAPI {
+            Task {
+                try? await api.nextTrack()
+                refreshAfterDelay()
+            }
+        } else {
+            bridge.nextTrack()
+            refreshAfterDelay()
+        }
+    }
+
+    private func doPreviousTrack() {
+        if useWebAPI, let api = webAPI {
+            Task {
+                try? await api.previousTrack()
+                refreshAfterDelay()
+            }
+        } else {
+            bridge.previousTrack()
+            refreshAfterDelay()
+        }
+    }
+
+    private func doSkipForward(_ seconds: Double) {
+        if useWebAPI, let api = webAPI {
+            Task {
+                let newPos = min(state.playerPosition + seconds, state.trackDuration)
+                try? await api.seek(positionMs: Int(newPos * 1000))
+                refreshAfterDelay()
+            }
+        } else {
+            bridge.skipForward(seconds)
+            refreshAfterDelay()
+        }
+    }
+
+    private func doSkipBackward(_ seconds: Double) {
+        if useWebAPI, let api = webAPI {
+            Task {
+                let newPos = max(state.playerPosition - seconds, 0)
+                try? await api.seek(positionMs: Int(newPos * 1000))
+                refreshAfterDelay()
+            }
+        } else {
+            bridge.skipBackward(seconds)
+            refreshAfterDelay()
+        }
+    }
+
+    private func doSeek(_ seconds: Double) {
+        if useWebAPI, let api = webAPI {
+            Task { try? await api.seek(positionMs: Int(seconds * 1000)) }
+        } else {
+            bridge.setPosition(seconds)
+        }
+    }
+
+    private func doSetVolume(_ volume: Int) {
+        if useWebAPI, let api = webAPI {
+            Task { try? await api.setVolume(percent: volume) }
+        } else {
+            bridge.setVolume(volume)
+        }
     }
 
     // MARK: - Helpers
@@ -708,20 +852,65 @@ struct SpotifyWidgetView: View {
     }
 
     private func refreshState() {
-        // Skip if a previous refresh is still in flight — prevents task
-        // accumulation when AppleScript takes longer than the 2-second poll interval.
+        // Skip if a previous refresh is still in flight
         guard !isRefreshing else { return }
         isRefreshing = true
 
-        let b = bridge
-        Task.detached {
-            let running = b.isSpotifyRunning()
-            let newState = running ? b.fetchPlaybackState() : SpotifyBridge.PlaybackState()
-            await MainActor.run {
-                isSpotifyRunning = running
-                state = newState
+        if useWebAPI, let api = webAPI {
+            // Web API path — async, no AppleScript
+            Task {
+                do {
+                    if let playback = try await api.getPlaybackState() {
+                        isSpotifyRunning = true
+                        state = SpotifyBridge.PlaybackState(
+                            isPlaying: playback.isPlaying,
+                            trackName: playback.item?.name ?? "",
+                            artistName: playback.item?.artistName ?? "",
+                            albumName: playback.item?.album.name ?? "",
+                            artworkURL: playback.item?.album.imageURL ?? "",
+                            trackDuration: Double(playback.item?.durationMs ?? 0) / 1000.0,
+                            playerPosition: Double(playback.progressMs ?? 0) / 1000.0,
+                            volume: playback.device?.volumePercent ?? state.volume
+                        )
+                        deviceName = playback.device?.name ?? ""
+                        deviceType = playback.device?.type ?? ""
+                    } else {
+                        // No active playback but API responded
+                        isSpotifyRunning = true
+                        state = SpotifyBridge.PlaybackState()
+                        deviceName = ""
+                        deviceType = ""
+                    }
+                } catch {
+                    // API error — could be no active device
+                    isSpotifyRunning = false
+                    deviceName = ""
+                    deviceType = ""
+                }
                 isRefreshing = false
             }
+        } else {
+            // AppleScript path — original behaviour
+            let b = bridge
+            Task.detached {
+                let running = b.isSpotifyRunning()
+                let newState = running ? b.fetchPlaybackState() : SpotifyBridge.PlaybackState()
+                await MainActor.run {
+                    isSpotifyRunning = running
+                    state = newState
+                    deviceName = ""
+                    deviceType = ""
+                    isRefreshing = false
+                }
+            }
+        }
+    }
+
+    /// Configure the Web API client and auth manager with the current client ID.
+    private func configureWebAPI() {
+        authManager.clientID = config.spotifyClientID
+        if webAPI == nil {
+            webAPI = SpotifyWebAPI(authManager: authManager)
         }
     }
 
@@ -729,6 +918,8 @@ struct SpotifyWidgetView: View {
         if let saved: SpotifyWidget.Config = configStore.read(instanceID: instanceID, as: SpotifyWidget.Config.self) {
             config = saved
         }
+        // Keep auth manager in sync with config
+        authManager.clientID = config.spotifyClientID
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -883,16 +1074,170 @@ struct SpotifySettingsView: View {
     let configStore: WidgetConfigStore
 
     @State private var config = SpotifyWidget.Config()
+    @StateObject private var authManager = SpotifyAuthManager()
+    @State private var webAPI: SpotifyWebAPI?
+    @State private var devices: [SpotifyWebAPI.Device] = []
+    @State private var isLoadingDevices = false
+    @State private var showingSetupGuide = false
 
     var body: some View {
         Form {
-            Toggle("Show album art", isOn: $config.showAlbumArt)
-            Toggle("Show progress bar", isOn: $config.showProgressBar)
-            Toggle("Album art color background", isOn: $config.showAlbumColors)
-            Toggle("Show skip 10s buttons", isOn: $config.showSkipButtons)
+            // MARK: Display Options
+            Section("Display") {
+                Toggle("Show album art", isOn: $config.showAlbumArt)
+                Toggle("Show progress bar", isOn: $config.showProgressBar)
+                Toggle("Album art color background", isOn: $config.showAlbumColors)
+                Toggle("Show skip 10s buttons", isOn: $config.showSkipButtons)
+            }
+
+            // MARK: Spotify Web API
+            Section("Spotify Web API") {
+                Toggle("Use Spotify Web API", isOn: $config.useWebAPI)
+
+                if config.useWebAPI {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Client ID")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Paste your Spotify Client ID", text: $config.spotifyClientID)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    .padding(.vertical, 2)
+
+                    HStack(spacing: 4) {
+                        Text("Redirect URI:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(SpotifyAuthManager.redirectURI)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    Button {
+                        showingSetupGuide = true
+                    } label: {
+                        Label("Setup Guide", systemImage: "questionmark.circle")
+                            .font(.callout)
+                    }
+
+                    // Auth status and actions
+                    if authManager.isAuthenticated {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Signed in as \(authManager.userDisplayName ?? "Spotify User")")
+                                .font(.callout)
+                        }
+                        .padding(.vertical, 2)
+
+                        Button("Sign Out") {
+                            authManager.logout()
+                            devices = []
+                        }
+                        .foregroundStyle(.red)
+                    } else {
+                        if authManager.isAuthenticating {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Waiting for Spotify authorization…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Button("Sign in with Spotify") {
+                                authManager.clientID = config.spotifyClientID
+                                authManager.login()
+                            }
+                            .disabled(config.spotifyClientID.isEmpty)
+                        }
+
+                        if let error = authManager.error {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+            }
+
+            // MARK: Devices
+            if config.useWebAPI && authManager.isAuthenticated {
+                Section("Devices") {
+                    if isLoadingDevices {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Loading devices…").font(.callout).foregroundStyle(.secondary)
+                        }
+                    } else if devices.isEmpty {
+                        Text("No devices found. Open Spotify on a device to see it here.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(devices) { device in
+                            HStack(spacing: 8) {
+                                Image(systemName: device.systemImage)
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(device.isActive ? .green : .secondary)
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(device.name)
+                                        .font(.callout)
+                                        .foregroundStyle(device.isActive ? .primary : .secondary)
+                                    if device.isActive {
+                                        Text("Currently playing")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
+                                }
+                                Spacer()
+                                if let vol = device.volumePercent {
+                                    Text("\(vol)%")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if !device.isActive {
+                                    Button("Transfer") {
+                                        transferPlayback(to: device)
+                                    }
+                                    .font(.caption)
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+
+                    Button {
+                        loadDevices()
+                    } label: {
+                        Label("Refresh Devices", systemImage: "arrow.clockwise")
+                            .font(.callout)
+                    }
+                }
+            }
         }
-        .onAppear { loadConfig() }
+        .onAppear {
+            loadConfig()
+            authManager.clientID = config.spotifyClientID
+            if webAPI == nil {
+                webAPI = SpotifyWebAPI(authManager: authManager)
+            }
+            if config.useWebAPI && authManager.isAuthenticated {
+                loadDevices()
+            }
+        }
+        .sheet(isPresented: $showingSetupGuide) {
+            SpotifySetupGuide()
+        }
         .onChange(of: config) { _, _ in saveConfig() }
+        .onChange(of: authManager.isAuthenticated) { _, authenticated in
+            if authenticated && config.useWebAPI {
+                loadDevices()
+            }
+        }
     }
 
     private func loadConfig() {
@@ -903,5 +1248,27 @@ struct SpotifySettingsView: View {
 
     private func saveConfig() {
         configStore.write(instanceID: instanceID, value: config)
+    }
+
+    private func loadDevices() {
+        guard let api = webAPI else { return }
+        isLoadingDevices = true
+        Task {
+            do {
+                devices = try await api.getDevices()
+            } catch {
+                devices = []
+            }
+            isLoadingDevices = false
+        }
+    }
+
+    private func transferPlayback(to device: SpotifyWebAPI.Device) {
+        guard let api = webAPI, let id = device.id else { return }
+        Task {
+            try? await api.transferPlayback(to: id)
+            try? await Task.sleep(for: .seconds(1))
+            loadDevices()
+        }
     }
 }

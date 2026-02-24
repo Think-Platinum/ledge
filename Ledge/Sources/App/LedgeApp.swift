@@ -10,15 +10,19 @@ struct LedgeApp: App {
 
     var body: some Scene {
         // Settings window — appears on the primary display.
-        // ThemeManager is passed via .environment() — SettingsView observes
-        // it directly and derives the theme, so changes propagate live.
+        // When running as a test host, show an empty view to avoid
+        // triggering display/permission work that kills the test runner.
         Window("Ledge Settings", id: "settings") {
-            SettingsView(
-                layoutManager: appDelegate.layoutManager,
-                configStore: appDelegate.configStore
-            )
-            .environmentObject(appDelegate.displayManager)
-            .environment(appDelegate.themeManager)
+            if AppEnvironment.isTesting {
+                EmptyView()
+            } else {
+                SettingsView(
+                    layoutManager: appDelegate.layoutManager,
+                    configStore: appDelegate.configStore
+                )
+                .environmentObject(appDelegate.displayManager)
+                .environment(appDelegate.themeManager)
+            }
         }
         .defaultSize(width: 800, height: 650)
     }

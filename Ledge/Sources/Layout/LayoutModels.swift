@@ -11,6 +11,10 @@ struct WidgetLayout: Codable, Identifiable, Equatable {
     var rows: Int
     var placements: [WidgetPlacement]
 
+    /// Optional per-page background image path. When set, overrides the global
+    /// dashboard background for this page only. When nil, uses the global setting.
+    var backgroundImagePath: String?
+
     /// Default layout for the Xeneon Edge (2560x720).
     /// A 20-column by 6-row grid for fine-grained widget sizing.
     static let defaultLayout = WidgetLayout(

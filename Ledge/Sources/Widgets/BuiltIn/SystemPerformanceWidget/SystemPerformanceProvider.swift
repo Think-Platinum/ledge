@@ -11,6 +11,11 @@ import os.log
 /// deallocated exactly once — a data race here causes a double-free crash.
 nonisolated class SystemPerformanceProvider: @unchecked Sendable {
 
+    /// Shared singleton so metrics and history survive page changes.
+    /// The provider is expensive to create (Mach buffers, IOKit state) and
+    /// all widget instances share the same system data anyway.
+    static let shared = SystemPerformanceProvider()
+
     private let logger = Logger(subsystem: "com.ledge.app", category: "SystemPerformance")
 
     struct Metrics: Sendable {

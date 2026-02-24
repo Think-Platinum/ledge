@@ -18,11 +18,8 @@ struct SettingsView: View {
                 NavigationLink(destination: DisplaySettingsView()) {
                     Label("Display", systemImage: "display")
                 }
-                NavigationLink(destination: WidgetSettingsView(layoutManager: layoutManager, configStore: configStore)) {
-                    Label("Widgets", systemImage: "square.grid.2x2")
-                }
-                NavigationLink(destination: LayoutEditorView(layoutManager: layoutManager)) {
-                    Label("Layout", systemImage: "rectangle.3.group")
+                NavigationLink(destination: WidgetsAndLayoutView(layoutManager: layoutManager, configStore: configStore)) {
+                    Label("Widgets & Layout", systemImage: "square.grid.2x2")
                 }
                 NavigationLink(destination: AppearanceSettingsView()) {
                     Label("Appearance", systemImage: "paintpalette")
@@ -46,46 +43,10 @@ struct DisplaySettingsView: View {
     @EnvironmentObject var displayManager: DisplayManager
 
     /// True when macOS shows a menu bar on every display (the default).
-    private var hasSeparateSpaces: Bool { NSScreen.screensHaveSeparateSpaces }
+
 
     var body: some View {
         Form {
-            // Show a prominent alert when the system setting causes a menu bar on the Edge
-            if hasSeparateSpaces && displayManager.xeneonScreen != nil {
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                            Text("Menu bar appears on the Xeneon Edge")
-                                .font(.headline)
-                        }
-
-                        Text("macOS shows a menu bar on every display when \"Displays have separate Spaces\" is enabled. Disabling it removes the menu bar from secondary displays like the Xeneon Edge.")
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-
-                        Divider()
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("To fix:")
-                                .font(.subheadline.bold())
-                            Text("1. Open **System Settings** > **Desktop & Dock**")
-                            Text("2. Scroll to **Mission Control**")
-                            Text("3. Turn off **Displays have separate Spaces**")
-                            Text("4. Log out and back in for the change to take effect")
-                        }
-                        .font(.callout)
-
-                        Button("Open Desktop & Dock Settings") {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension")!)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-
             Section("Xeneon Edge") {
                 HStack {
                     Image(systemName: displayManager.isActive ? "checkmark.circle.fill" : "xmark.circle")
@@ -171,6 +132,25 @@ struct DisplaySettingsView: View {
                         displayManager.stopTouchRemapper()
                     }
                 }
+
+                Divider()
+
+                Toggle("Block mouse on Edge display", isOn: $displayManager.isMouseGuardEnabled)
+                    .disabled(!displayManager.isTouchRemapperActive || displayManager.touchRemapper.touchDeviceIDs.isEmpty)
+                    .help("Prevents non-touchscreen mouse events from interacting with widgets on the Edge display")
+
+                if displayManager.isMouseGuardEnabled && displayManager.mouseGuard.isActive {
+                    LabeledContent("Mouse Guard") {
+                        HStack {
+                            Image(systemName: "shield.checkered")
+                                .foregroundColor(.green)
+                            Text("Active")
+                        }
+                    }
+                }
+
+                Toggle("Show touch indicator", isOn: $displayManager.showTouchIndicator)
+                    .help("Shows a visual ripple at touch points on the Edge display")
             }
 
             Section("Connected Displays") {
@@ -203,82 +183,437 @@ struct DisplaySettingsView: View {
     }
 }
 
-// MARK: - Widget Settings
+// MARK: - Widgets & Layout (Consolidated)
 
-struct WidgetSettingsView: View {
+/// Unified view for managing widgets, layout, and pages.
+/// Top: page selector and grid editor. Bottom: widget list with config, add/remove.
+struct WidgetsAndLayoutView: View {
     let layoutManager: LayoutManager
     let configStore: WidgetConfigStore
     let registry = WidgetRegistry.shared
 
+    @Environment(ThemeManager.self) private var themeManager
+
+    @State private var selectedWidgetID: UUID?
     @State private var showAddWidget = false
+    @State private var renamingPageID: UUID?
+    @State private var renameText = ""
+    @State private var showingPageImagePicker = false
+    @State private var imagePickerPageID: UUID?
+    @State private var showPositionSize = false
 
     var body: some View {
-        Form {
-            Section("Active Widgets") {
-                if layoutManager.activeLayout.placements.isEmpty {
-                    Text("No widgets placed. Click + to add one.")
-                        .foregroundColor(.secondary)
-                } else {
-                    ForEach(layoutManager.activeLayout.placements) { placement in
-                        DisclosureGroup {
-                            widgetConfigContent(placement)
+        VStack(spacing: 0) {
+            // Page selector bar
+            pageSelector
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+            // Grid editor for active page
+            InteractiveGridEditor(
+                layoutManager: layoutManager,
+                selectedWidgetID: $selectedWidgetID
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: 200)
+            .padding(.horizontal, 16)
+
+            Divider()
+                .padding(.top, 8)
+
+            // Widget list and config
+            ScrollView {
+                VStack(spacing: 0) {
+                    if let selectedID = selectedWidgetID,
+                       let placement = layoutManager.activeLayout.placements.first(where: { $0.id == selectedID }) {
+                        selectedWidgetDetail(placement)
+                    } else {
+                        widgetList
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .navigationTitle("Widgets & Layout")
+        .sheet(isPresented: $showAddWidget) {
+            AddWidgetSheet(layoutManager: layoutManager, configStore: configStore)
+        }
+        .fileImporter(
+            isPresented: $showingPageImagePicker,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                let gotAccess = url.startAccessingSecurityScopedResource()
+                defer { if gotAccess { url.stopAccessingSecurityScopedResource() } }
+                if let pageID = imagePickerPageID {
+                    setPageBackground(pageID: pageID, path: url.path)
+                }
+            }
+        }
+    }
+
+    // MARK: - Page Selector
+
+    private var pageSelector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Pages")
+                    .font(.headline)
+                Spacer()
+
+                // Auto-rotation indicator
+                if layoutManager.autoRotateEnabled {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.trianglehead.2.counterclockwise.rotate.90")
+                            .font(.system(size: 10))
+                        Text("\(Int(layoutManager.autoRotateInterval))s")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.5))
+                    .clipShape(Capsule())
+                }
+
+                // Auto-rotation toggle
+                Toggle("Auto-rotate", isOn: Binding(
+                    get: { layoutManager.autoRotateEnabled },
+                    set: { layoutManager.autoRotateEnabled = $0 }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+
+                Button {
+                    let newPage = layoutManager.createLayout(name: "Page \(layoutManager.pageCount + 1)")
+                    layoutManager.switchLayout(to: newPage)
+                    selectedWidgetID = nil
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Add a new empty page")
+            }
+
+            // Page tabs
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Array(layoutManager.savedLayouts.enumerated()), id: \.element.id) { index, layout in
+                        let isActive = layout.id == layoutManager.activeLayout.id
+
+                        Button {
+                            layoutManager.switchLayout(to: layout)
+                            selectedWidgetID = nil
                         } label: {
-                            widgetRow(placement)
+                            HStack(spacing: 6) {
+                                if renamingPageID == layout.id {
+                                    TextField("Name", text: $renameText)
+                                        .textFieldStyle(.plain)
+                                        .frame(width: 80)
+                                        .onSubmit {
+                                            layoutManager.renameLayout(id: layout.id, to: renameText)
+                                            renamingPageID = nil
+                                        }
+                                } else {
+                                    Text(layout.name)
+                                        .lineLimit(1)
+                                }
+                                Text("(\(layout.placements.count))")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                            .foregroundStyle(isActive ? .primary : .secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(isActive ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.15), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Rename") {
+                                renameText = layout.name
+                                renamingPageID = layout.id
+                            }
+                            Button("Duplicate Page") {
+                                let newPage = layoutManager.duplicateLayout(
+                                    layout,
+                                    name: "\(layout.name) Copy"
+                                )
+                                layoutManager.switchLayout(to: newPage)
+                                selectedWidgetID = nil
+                            }
+                            Divider()
+                            Button("Set Background Image…") {
+                                imagePickerPageID = layout.id
+                                showingPageImagePicker = true
+                            }
+                            if layout.backgroundImagePath != nil {
+                                Button("Remove Background") {
+                                    setPageBackground(pageID: layout.id, path: nil)
+                                }
+                            }
+                            Divider()
+                            Button("Delete", role: .destructive) {
+                                layoutManager.deleteLayout(id: layout.id)
+                            }
+                            .disabled(isActive && layoutManager.pageCount <= 1)
                         }
                     }
                 }
             }
 
-            Section {
+            // Page background — visible inline control for the active page
+            HStack(spacing: 8) {
+                Image(systemName: "photo")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                if let bgPath = layoutManager.activeLayout.backgroundImagePath, !bgPath.isEmpty {
+                    Text(URL(fileURLWithPath: bgPath).lastPathComponent)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    Button("Remove") {
+                        setPageBackground(pageID: layoutManager.activeLayout.id, path: nil)
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                } else {
+                    Text("No page background")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+
+                    Spacer()
+                }
+
+                Button("Set Background…") {
+                    imagePickerPageID = layoutManager.activeLayout.id
+                    showingPageImagePicker = true
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    // MARK: - Widget List
+
+    private var widgetList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Widgets on \(layoutManager.activeLayout.name)")
+                    .font(.headline)
+                Spacer()
                 Button {
                     showAddWidget = true
                 } label: {
                     Label("Add Widget", systemImage: "plus.circle")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if layoutManager.activeLayout.placements.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "square.dashed")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.tertiary)
+                    Text("No widgets on this page.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Click \"Add Widget\" or tap a cell in the grid above.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            } else {
+                Text("Click a widget in the grid or list to select it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(layoutManager.activeLayout.placements) { placement in
+                    let descriptor = registry.registeredTypes[placement.widgetTypeID]
+                    Button {
+                        selectedWidgetID = placement.id
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: descriptor?.iconSystemName ?? "questionmark.square")
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(descriptor?.displayName ?? placement.widgetTypeID)
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("\(placement.columnSpan)×\(placement.rowSpan) at (\(placement.column), \(placement.row))")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
+                        .background(Color(.controlBackgroundColor).opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            // Page info
+            Divider()
+                .padding(.vertical, 4)
+
+            HStack {
+                Text("Grid: \(layoutManager.activeLayout.columns)×\(layoutManager.activeLayout.rows)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Page \(layoutManager.activePageIndex + 1) of \(layoutManager.pageCount)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Selected Widget Detail
+
+    @ViewBuilder
+    private func selectedWidgetDetail(_ placement: WidgetPlacement) -> some View {
+        let descriptor = registry.registeredTypes[placement.widgetTypeID]
+        let grid = layoutManager.activeLayout
+
+        VStack(alignment: .leading, spacing: 12) {
+            // Header with back button
+            HStack {
+                Button {
+                    selectedWidgetID = nil
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("Back")
+                            .font(.system(size: 13))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+
+                Spacer()
+
+                Text(descriptor?.displayName ?? placement.widgetTypeID)
+                    .font(.headline)
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    layoutManager.removeWidget(id: placement.id)
+                    selectedWidgetID = nil
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Divider()
+
+            // Position & Size (collapsed by default — mainly for fine-tuning)
+            DisclosureGroup("Position & Size", isExpanded: $showPositionSize) {
+                let colBinding = Binding<Int>(
+                    get: { placement.column },
+                    set: { var p = placement; p.column = $0; layoutManager.updateWidget(p) }
+                )
+                let rowBinding = Binding<Int>(
+                    get: { placement.row },
+                    set: { var p = placement; p.row = $0; layoutManager.updateWidget(p) }
+                )
+                let colSpanBinding = Binding<Int>(
+                    get: { placement.columnSpan },
+                    set: { var p = placement; p.columnSpan = $0; layoutManager.updateWidget(p) }
+                )
+                let rowSpanBinding = Binding<Int>(
+                    get: { placement.rowSpan },
+                    set: { var p = placement; p.rowSpan = $0; layoutManager.updateWidget(p) }
+                )
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Column")
+                        Spacer()
+                        Stepper("\(placement.column)", value: colBinding,
+                                in: 0...(grid.columns - placement.columnSpan))
+                    }
+                    HStack {
+                        Text("Row")
+                        Spacer()
+                        Stepper("\(placement.row)", value: rowBinding,
+                                in: 0...(grid.rows - placement.rowSpan))
+                    }
+                    Divider()
+                    HStack {
+                        Text("Width")
+                        Spacer()
+                        Stepper("\(placement.columnSpan) cols", value: colSpanBinding,
+                                in: 1...(grid.columns - placement.column))
+                    }
+                    HStack {
+                        Text("Height")
+                        Spacer()
+                        Stepper("\(placement.rowSpan) rows", value: rowSpanBinding,
+                                in: 1...(grid.rows - placement.row))
+                    }
+                }
+                .font(.system(size: 13))
+                .padding(.top, 4)
+            }
+            .font(.system(size: 13, weight: .medium))
+            .padding(8)
+            .background(Color(.controlBackgroundColor).opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            // Widget-specific settings
+            if let settingsView = registry.createSettingsView(
+                typeID: placement.widgetTypeID,
+                instanceID: placement.id,
+                configStore: configStore
+            ) {
+                GroupBox("Widget Settings") {
+                    settingsView
+                        .padding(8)
                 }
             }
         }
-        .formStyle(.grouped)
-        .navigationTitle("Widgets")
-        .sheet(isPresented: $showAddWidget) {
-            AddWidgetSheet(layoutManager: layoutManager, configStore: configStore)
-        }
     }
 
-    private func widgetRow(_ placement: WidgetPlacement) -> some View {
-        let descriptor = registry.registeredTypes[placement.widgetTypeID]
-        return HStack {
-            Image(systemName: descriptor?.iconSystemName ?? "questionmark.square")
-                .foregroundColor(.accentColor)
-            VStack(alignment: .leading) {
-                Text(descriptor?.displayName ?? placement.widgetTypeID)
-                    .font(.body)
-                Text("Col \(placement.column), Row \(placement.row) — \(placement.columnSpan)x\(placement.rowSpan)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
+    // MARK: - Helpers
 
-    @ViewBuilder
-    private func widgetConfigContent(_ placement: WidgetPlacement) -> some View {
-        // Widget-specific settings
-        if let settingsView = registry.createSettingsView(
-            typeID: placement.widgetTypeID,
-            instanceID: placement.id,
-            configStore: configStore
-        ) {
-            Section("Widget Settings") {
-                settingsView
+    private func setPageBackground(pageID: UUID, path: String?) {
+        if let index = layoutManager.savedLayouts.firstIndex(where: { $0.id == pageID }) {
+            layoutManager.savedLayouts[index].backgroundImagePath = path
+            if layoutManager.activeLayout.id == pageID {
+                layoutManager.activeLayout.backgroundImagePath = path
             }
-        }
-
-        // Delete button
-        Section {
-            Button(role: .destructive) {
-                layoutManager.removeWidget(id: placement.id)
-            } label: {
-                Label("Remove Widget", systemImage: "trash")
-            }
+            layoutManager.save()
         }
     }
 }
@@ -470,30 +805,71 @@ struct AddWidgetSheet: View {
             addWidget(descriptor)
             dismiss()
         } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                // Icon header area
-                HStack(alignment: .top) {
-                    // Large icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(accentColor.opacity(0.15))
-                            .frame(width: 44, height: 44)
-                        Image(systemName: descriptor.iconSystemName)
-                            .font(.system(size: 20))
-                            .foregroundStyle(accentColor)
-                    }
+            HStack(spacing: 0) {
+                // Left side: widget preview thumbnail
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color(.windowBackgroundColor).opacity(0.6))
 
-                    Spacer()
+                    // Render the actual widget scaled down as a preview
+                    descriptor.viewFactory(UUID(), configStore)
+                        .frame(width: 320, height: 200)
+                        .scaleEffect(0.35, anchor: .center)
+                        .frame(width: 112, height: 70)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .allowsHitTesting(false)
+                }
+                .frame(width: 112, height: 90)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5)
+                )
+                .padding(.trailing, 12)
 
-                    // Size badge + already added indicator
-                    VStack(alignment: .trailing, spacing: 4) {
+                // Right side: info
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .center) {
+                        // Icon
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(accentColor.opacity(0.15))
+                                .frame(width: 24, height: 24)
+                            Image(systemName: descriptor.iconSystemName)
+                                .font(.system(size: 12))
+                                .foregroundStyle(accentColor)
+                        }
+
+                        Text(descriptor.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Spacer()
+
                         Text("\(descriptor.defaultSize.columns)×\(descriptor.defaultSize.rows)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .padding(.horizontal, 6)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(.quaternary)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                             .foregroundStyle(.secondary)
+                    }
+
+                    Text(descriptor.description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 0)
+
+                    HStack {
+                        Text(category.rawValue)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(accentColor.opacity(0.8))
+
+                        Spacer()
 
                         if isAlreadyAdded {
                             HStack(spacing: 3) {
@@ -506,32 +882,10 @@ struct AddWidgetSheet: View {
                         }
                     }
                 }
-                .padding(.bottom, 10)
-
-                // Name
-                Text(descriptor.displayName)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                // Description
-                Text(descriptor.description)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Spacer(minLength: 0)
-
-                // Category tag
-                Text(category.rawValue)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(accentColor.opacity(0.8))
-                    .padding(.top, 6)
             }
-            .padding(14)
+            .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 150)
+            .frame(height: 110)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(isHovered ? accentColor.opacity(0.06) : Color(.controlBackgroundColor))
@@ -565,156 +919,7 @@ struct AddWidgetSheet: View {
     }
 }
 
-// MARK: - Layout Editor (Graphical)
-
-struct LayoutEditorView: View {
-    let layoutManager: LayoutManager
-
-    @State private var selectedWidgetID: UUID?
-    @State private var showAddWidget = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Grid editor
-            InteractiveGridEditor(
-                layoutManager: layoutManager,
-                selectedWidgetID: $selectedWidgetID
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 220)
-            .padding(16)
-
-            Divider()
-
-            // Selected widget details / widget list
-            Form {
-                if let selectedID = selectedWidgetID,
-                   let placement = layoutManager.activeLayout.placements.first(where: { $0.id == selectedID }) {
-                    selectedWidgetSection(placement)
-                } else {
-                    Section("Widgets") {
-                        Text("Click a widget in the grid above to select it, then drag to reposition or resize.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        ForEach(layoutManager.activeLayout.placements) { placement in
-                            let descriptor = WidgetRegistry.shared.registeredTypes[placement.widgetTypeID]
-                            Button {
-                                selectedWidgetID = placement.id
-                            } label: {
-                                HStack {
-                                    Image(systemName: descriptor?.iconSystemName ?? "questionmark.square")
-                                        .foregroundColor(.accentColor)
-                                    Text(descriptor?.displayName ?? placement.widgetTypeID)
-                                    Spacer()
-                                    Text("\(placement.columnSpan)x\(placement.rowSpan) at (\(placement.column),\(placement.row))")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-
-                Section("Layout") {
-                    LabeledContent("Grid") {
-                        Text("\(layoutManager.activeLayout.columns) x \(layoutManager.activeLayout.rows)")
-                    }
-                    LabeledContent("Widgets") {
-                        Text("\(layoutManager.activeLayout.placements.count)")
-                    }
-                }
-
-                Section("Saved Layouts") {
-                    ForEach(layoutManager.savedLayouts) { layout in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(layout.name)
-                                Text("\(layout.placements.count) widgets")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            if layout.id == layoutManager.activeLayout.id {
-                                Text("Active")
-                                    .font(.caption)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(.blue.opacity(0.2))
-                                    .clipShape(Capsule())
-                            } else {
-                                Button("Switch") {
-                                    layoutManager.switchLayout(to: layout)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                    }
-                }
-            }
-            .formStyle(.grouped)
-        }
-        .navigationTitle("Layout")
-    }
-
-    @ViewBuilder
-    private func selectedWidgetSection(_ placement: WidgetPlacement) -> some View {
-        let descriptor = WidgetRegistry.shared.registeredTypes[placement.widgetTypeID]
-        let grid = layoutManager.activeLayout
-
-        Section("Selected: \(descriptor?.displayName ?? placement.widgetTypeID)") {
-            HStack {
-                Text("Position")
-                Spacer()
-                Stepper("Col \(placement.column)", value: Binding(
-                    get: { placement.column },
-                    set: { var p = placement; p.column = $0; layoutManager.updateWidget(p) }
-                ), in: 0...(grid.columns - placement.columnSpan))
-            }
-
-            HStack {
-                Text("")
-                Spacer()
-                Stepper("Row \(placement.row)", value: Binding(
-                    get: { placement.row },
-                    set: { var p = placement; p.row = $0; layoutManager.updateWidget(p) }
-                ), in: 0...(grid.rows - placement.rowSpan))
-            }
-
-            HStack {
-                Text("Size")
-                Spacer()
-                Stepper("\(placement.columnSpan)w", value: Binding(
-                    get: { placement.columnSpan },
-                    set: { var p = placement; p.columnSpan = $0; layoutManager.updateWidget(p) }
-                ), in: 1...(grid.columns - placement.column))
-            }
-
-            HStack {
-                Text("")
-                Spacer()
-                Stepper("\(placement.rowSpan)h", value: Binding(
-                    get: { placement.rowSpan },
-                    set: { var p = placement; p.rowSpan = $0; layoutManager.updateWidget(p) }
-                ), in: 1...(grid.rows - placement.row))
-            }
-
-            HStack {
-                Button("Deselect") {
-                    selectedWidgetID = nil
-                }
-                Spacer()
-                Button(role: .destructive) {
-                    layoutManager.removeWidget(id: placement.id)
-                    selectedWidgetID = nil
-                } label: {
-                    Label("Remove", systemImage: "trash")
-                }
-            }
-        }
-    }
-}
+// (LayoutEditorView has been consolidated into WidgetsAndLayoutView above)
 
 // MARK: - Interactive Grid Editor
 
@@ -838,10 +1043,13 @@ struct InteractiveGridEditor: View {
                     }
                     .frame(width: w, height: h)
                     .offset(x: x, y: y)
-                    .animation(.easeOut(duration: 0.15), value: col)
-                    .animation(.easeOut(duration: 0.15), value: row)
-                    .animation(.easeOut(duration: 0.15), value: colSpan)
-                    .animation(.easeOut(duration: 0.15), value: rowSpan)
+                    // Only animate snapping when NOT actively dragging/resizing.
+                    // During active gestures, move instantly to avoid jitter from
+                    // overlapping animations fighting each other.
+                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: col)
+                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: row)
+                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: colSpan)
+                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: rowSpan)
                     .zIndex(isDragging || isSelected ? 10 : 0)
                     .opacity(isDragging ? 0.8 : 1.0)
                     .onTapGesture {
@@ -889,6 +1097,8 @@ struct InteractiveGridEditor: View {
     }
 }
 
+// (PagesSettingsView has been consolidated into WidgetsAndLayoutView above)
+
 // MARK: - Appearance Settings
 
 struct AppearanceSettingsView: View {
@@ -919,30 +1129,34 @@ struct AppearanceSettingsView: View {
                 }
             }
 
-            Section("Widget Background") {
-                Picker("Style", selection: Binding(
-                    get: { themeManager.widgetBackgroundStyle },
-                    set: { themeManager.widgetBackgroundStyle = $0 }
-                )) {
-                    ForEach(WidgetBackgroundStyle.allCases, id: \.self) { style in
-                        Text(style.displayName).tag(style)
+            // Hide Widget Background when the active theme forces its own style
+            // (e.g. Liquid Glass always uses blur)
+            if themeManager.resolvedTheme.preferredBackgroundStyle == nil {
+                Section("Widget Background") {
+                    Picker("Style", selection: Binding(
+                        get: { themeManager.widgetBackgroundStyle },
+                        set: { themeManager.widgetBackgroundStyle = $0 }
+                    )) {
+                        ForEach(WidgetBackgroundStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
                     }
-                }
-                .pickerStyle(.radioGroup)
+                    .pickerStyle(.radioGroup)
 
-                switch themeManager.widgetBackgroundStyle {
-                case .solid:
-                    Text("Widgets have a solid background from the active theme.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                case .blur:
-                    Text("Widgets blur the content behind them, creating a frosted glass effect. Works best with a background image.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                case .transparent:
-                    Text("Widgets have no background — content floats directly over the dashboard background.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    switch themeManager.widgetBackgroundStyle {
+                    case .solid:
+                        Text("Widgets have a solid background from the active theme.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    case .blur:
+                        Text("Widgets blur the content behind them, creating a frosted glass effect. Works best with a background image.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    case .transparent:
+                        Text("Widgets have no background — content floats directly over the dashboard background.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
 

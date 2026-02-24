@@ -1,4 +1,4 @@
-import AppKit
+@preconcurrency import AppKit
 import CoreGraphics
 import os.log
 
@@ -16,7 +16,7 @@ import os.log
 ///
 /// Because the original events are fully suppressed and the synthetic NSEvents never
 /// enter the window server, this approach:
-/// - Does NOT move the cursor
+/// - Does NOT move the cursor (see note: HID may reposition cursor before tap fires)
 /// - Does NOT change window ordering or focus
 /// - Does NOT activate the Ledge application
 ///
@@ -351,11 +351,16 @@ nonisolated class TouchRemapper {
 
     /// Convert a CG point to window-local Cocoa coordinates.
     /// Delegates to `TouchCoordinateMath.cgPointToWindowLocal`.
+    ///
+    /// Uses `MainActor.assumeIsolated` because this is called from the CGEventTap
+    /// callback which runs on the main thread's run loop — accessing `window.frame`
+    /// is safe, but the compiler can't verify this statically.
     private func cgPointToWindowLocal(_ cgPoint: CGPoint, in window: NSWindow) -> NSPoint {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let windowFrame = MainActor.assumeIsolated { window.frame }
         return TouchCoordinateMath.cgPointToWindowLocal(
             cgPoint,
-            windowFrame: window.frame,
+            windowFrame: windowFrame,
             primaryHeight: primaryHeight
         )
     }
@@ -406,7 +411,8 @@ nonisolated class TouchRemapper {
 
         // Build the NSEvent NOW while the CGEvent is still valid.
         // The windowNumber and coordinates are captured eagerly.
-        let windowNumber = panel.windowNumber
+        // Uses assumeIsolated because CGEventTap runs on the main thread.
+        let windowNumber = MainActor.assumeIsolated { panel.windowNumber }
 
         guard let nsEvent = NSEvent.mouseEvent(
             with: nsType,
@@ -427,20 +433,25 @@ nonisolated class TouchRemapper {
         // The CGEventTap callback runs inside a run loop source; calling
         // panel.sendEvent() synchronously can block if SwiftUI re-enters
         // the run loop for layout/animation. Async dispatch breaks the cycle.
+        //
+        // nonisolated(unsafe): NSEvent is non-Sendable but this is safe —
+        // we're already on the main thread and dispatching to main.
+        let capturedPanel = panel
+        nonisolated(unsafe) let capturedEvent = nsEvent
         DispatchQueue.main.async {
             // Prevent any window ordering changes from this event
             NSApp.preventWindowOrdering()
 
             // Ensure the panel is key so SwiftUI gesture recognizers are active.
             // On a .nonactivatingPanel this does NOT activate the app.
-            if !panel.isKeyWindow {
-                panel.makeKey()
+            if !capturedPanel.isKeyWindow {
+                capturedPanel.makeKey()
             }
 
             // Deliver directly to the panel — this goes through NSWindow.sendEvent
             // which does hit testing and routes to the NSHostingView (SwiftUI).
             // The event never enters the window server.
-            panel.sendEvent(nsEvent)
+            capturedPanel.sendEvent(capturedEvent)
         }
     }
 

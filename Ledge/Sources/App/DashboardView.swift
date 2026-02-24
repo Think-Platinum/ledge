@@ -19,6 +19,8 @@ struct DashboardView: View {
     @State private var dragOffset: CGFloat = 0
     /// Briefly shows the page indicator after a page switch.
     @State private var showPageIndicator = false
+    /// Direction of the last page transition (for slide animation).
+    @State private var transitionDirection: TransitionDirection = .none
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -27,8 +29,13 @@ struct DashboardView: View {
                 configStore: configStore,
                 registry: registry
             )
+            .id(layoutManager.activeLayout.id)
+            .transition(pageTransition)
             .offset(x: dragOffset)
             .gesture(swipeGesture)
+
+            // Touch visual indicator (ripples at touch points)
+            TouchVisualIndicator()
 
             // Page indicator (only shown when multiple pages exist)
             if layoutManager.pageCount > 1 {
@@ -41,6 +48,7 @@ struct DashboardView: View {
                 .animation(.easeInOut(duration: 0.3), value: showPageIndicator)
             }
         }
+        .animation(.easeInOut(duration: 0.35), value: layoutManager.activeLayout.id)
         .environment(\.theme, themeManager.resolvedTheme)
         .ignoresSafeArea()
         .onChange(of: layoutManager.activeLayout.id) { _, _ in
@@ -75,6 +83,29 @@ struct DashboardView: View {
         displayManager.panel?.setTransparent(effectiveStyle != .solid)
     }
 
+    // MARK: - Page Transition
+
+    /// Tracks whether the user swiped left or right for directional animation.
+    private enum TransitionDirection { case none, forward, backward }
+
+    /// Asymmetric slide transition based on swipe direction.
+    private var pageTransition: AnyTransition {
+        switch transitionDirection {
+        case .forward:
+            return .asymmetric(
+                insertion: .move(edge: .trailing).combined(with: .opacity),
+                removal: .move(edge: .leading).combined(with: .opacity)
+            )
+        case .backward:
+            return .asymmetric(
+                insertion: .move(edge: .leading).combined(with: .opacity),
+                removal: .move(edge: .trailing).combined(with: .opacity)
+            )
+        case .none:
+            return .opacity
+        }
+    }
+
     // MARK: - Swipe Gesture
 
     private var swipeGesture: some Gesture {
@@ -92,11 +123,17 @@ struct DashboardView: View {
                 }
 
                 if value.translation.width < -threshold {
-                    // Swiped left → next page
-                    layoutManager.nextPage()
+                    transitionDirection = .forward
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        layoutManager.nextPage()
+                    }
+                    layoutManager.resetAutoRotationTimer()
                 } else if value.translation.width > threshold {
-                    // Swiped right → previous page
-                    layoutManager.previousPage()
+                    transitionDirection = .backward
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        layoutManager.previousPage()
+                    }
+                    layoutManager.resetAutoRotationTimer()
                 }
             }
     }
@@ -133,59 +170,5 @@ struct PageIndicator: View {
             Capsule()
                 .fill(.black.opacity(0.3))
         )
-    }
-}
-
-// MARK: - Touch Debug Overlay
-
-/// Debug overlay showing the touch pipeline state.
-/// Displayed on the dashboard during development to diagnose touch issues.
-struct TouchDebugOverlay: View {
-    @EnvironmentObject var displayManager: DisplayManager
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            row("AX Permission",
-                value: displayManager.accessibilityPermission.rawValue,
-                color: displayManager.accessibilityPermission == .granted ? .green : .yellow)
-
-            row("Event Tap",
-                value: displayManager.isTouchRemapperActive ? "Active" : "Inactive",
-                color: displayManager.isTouchRemapperActive ? .green : .red)
-
-            row("Calibration",
-                value: displayManager.calibrationState.rawValue,
-                color: (displayManager.calibrationState == .calibrated
-                    || displayManager.calibrationState == .autoDetected) ? .green : .yellow)
-
-            if let deviceID = displayManager.learnedDeviceID {
-                row("Device ID", value: "\(deviceID)", color: .green)
-            }
-
-            if let touch = displayManager.lastTouchInfo {
-                let orig = touch.originalPoint
-                row("Last Touch",
-                    value: String(format: "(%.0f, %.0f) → %@",
-                                  orig.x, orig.y,
-                                  touch.remappedPoint.map { String(format: "(%.0f, %.0f)", $0.x, $0.y) } ?? "nil"),
-                    color: .white)
-            }
-        }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
-        .padding(8)
-        .background(.black.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    private func row(_ label: String, value: String, color: Color) -> some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text("\(label):")
-                .foregroundColor(.white.opacity(0.5))
-            Text(value)
-                .foregroundColor(.white.opacity(0.8))
-        }
     }
 }

@@ -6,16 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXContainerItemProxy section */
-		525D82732F44902A00CB5A80 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 525C69202F3BBEA000BDD89D /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 525C69272F3BBEA000BDD89D;
-			remoteInfo = Ledge;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin PBXFileReference section */
 		525C69282F3BBEA000BDD89D /* Ledge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ledge.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		525D826F2F44902A00CB5A80 /* LedgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LedgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -119,7 +109,6 @@
 			buildRules = (
 			);
 			dependencies = (
-				525D82742F44902A00CB5A80 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				525D82702F44902A00CB5A80 /* LedgeTests */,
@@ -146,7 +135,6 @@
 					};
 					525D826E2F44902A00CB5A80 = {
 						CreatedOnToolsVersion = 26.2;
-						TestTargetID = 525C69272F3BBEA000BDD89D;
 					};
 				};
 			};
@@ -203,14 +191,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		525D82742F44902A00CB5A80 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 525C69272F3BBEA000BDD89D /* Ledge */;
-			targetProxy = 525D82732F44902A00CB5A80 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		525C69312F3BBEA200BDD89D /* Debug */ = {
@@ -408,38 +388,42 @@
 		525D82752F44902A00CB5A80 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.thinkplatinum.LedgeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ledge.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Ledge";
 			};
 			name = Debug;
 		};
 		525D82762F44902A00CB5A80 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.thinkplatinum.LedgeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ledge.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Ledge";
 			};
 			name = Release;
 		};

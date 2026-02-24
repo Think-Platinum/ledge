@@ -57,6 +57,24 @@ class DisplayManager: ObservableObject {
     /// Watchdog timer that monitors CGEventTap health independently of the callback.
     let touchWatchdog = TouchWatchdog()
 
+    /// Mouse guard that blocks non-touchscreen mouse events on the Edge display.
+    let mouseGuard = MouseGuard()
+
+    /// Whether the mouse guard is enabled. Persisted in UserDefaults.
+    @Published var isMouseGuardEnabled: Bool = UserDefaults.standard.bool(forKey: "mouseGuardEnabled") {
+        didSet {
+            UserDefaults.standard.set(isMouseGuardEnabled, forKey: "mouseGuardEnabled")
+            updateMouseGuardState()
+        }
+    }
+
+    /// Whether to show a visual ripple indicator at touch points.
+    @Published var showTouchIndicator: Bool = UserDefaults.standard.object(forKey: "showTouchIndicator") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(showTouchIndicator, forKey: "showTouchIndicator")
+        }
+    }
+
     /// Whether Accessibility permissions have been granted (required for CGEventTap).
     @Published private(set) var accessibilityPermission: AccessibilityPermission = .unknown
 
@@ -149,10 +167,15 @@ class DisplayManager: ObservableObject {
     private var onPermissionsResolved: (() -> Void)?
     /// Observers for sleep/lock/screensaver events.
     private var securityObservers: [Any] = []
+    /// Callback invoked once Accessibility permission is granted (pre-fullscreen gate).
+    private var accessibilityPermissionCompletion: (() -> Void)?
+    /// Timer polling for Accessibility permission before fullscreen.
+    private var accessibilityGateTimer: Timer?
 
     // MARK: - Lifecycle
 
     init() {
+        guard !AppEnvironment.isTesting else { return }
         registerForDisplayChanges()
         registerForSecurityEvents()
         detectXenonEdge()
@@ -208,6 +231,11 @@ class DisplayManager: ObservableObject {
     // MARK: - Panel Management
 
     /// Show the panel on the Xeneon Edge.
+    ///
+    /// Uses a fullscreen helper window to create a dedicated fullscreen Space on the Edge,
+    /// which auto-hides the menu bar — the same mechanism Safari, Chrome, and Parallels use.
+    /// With "Displays have separate Spaces" enabled, each display manages its own Spaces
+    /// independently so this does NOT affect Space switching on the primary display.
     func showPanel() {
         guard let screen = xeneonScreen else {
             logger.error("Cannot show panel: no Xeneon Edge screen detected")
@@ -217,22 +245,40 @@ class DisplayManager: ObservableObject {
         if panel == nil {
             panel = LedgePanel(on: screen)
             touchRemapper.panel = panel
+
+            // Wire delivery confirmation for latency tracking.
+            // When the panel receives a touch event via sendEvent(), record the
+            // delivery timestamp and update the flight recorder entry.
+            panel?.onEventReceived = { [weak self] _ in
+                let deliveryTime = Date()
+                guard let self else { return }
+                // The most recent flight recorder entry corresponds to this delivery.
+                // Compute latency = delivery time - event arrival time.
+                if let lastEntry = self.flightRecorder.recentEntries(count: 1).last,
+                   lastEntry.deliveryLatencyMs == nil {
+                    let latencyMs = deliveryTime.timeIntervalSince(lastEntry.timestamp) * 1000.0
+                    self.flightRecorder.updateLatency(sequenceID: lastEntry.sequenceID, latencyMs: latencyMs)
+                }
+            }
+
             logger.info("Created LedgePanel on Xeneon Edge")
         }
 
-        // The LedgePanel at .screenSaver level (1000) is well above the menu bar (~24),
-        // so it covers the menu bar on the Edge without needing a fullscreen helper.
-        //
-        // We deliberately avoid a FullscreenHelperWindow because entering native fullscreen
-        // on the Edge creates a dedicated fullscreen Space that participates in macOS Space
-        // switching — when the user swipes Spaces on their primary display, the Edge Space
-        // would animate/switch too, disrupting the always-visible widget dashboard.
-        revealPanel(on: screen)
+        // Enter fullscreen on the Edge to auto-hide the menu bar via the
+        // fullscreen helper. The LedgePanel's .fullScreenAuxiliary collection
+        // behavior makes it render on top of the fullscreen Space.
+        ensureFullscreenHelper(on: screen) { [weak self] in
+            guard let self else { return }
+            self.revealPanel(on: screen)
+        }
     }
 
     /// Actually make the panel visible. Called directly (no fullscreen helper needed)
     /// or after the fullscreen helper finishes its transition.
     private func revealPanel(on screen: NSScreen) {
+        // Ensure panel is positioned correctly on the target screen
+        panel?.setFrame(screen.frame, display: true, animate: false)
+
         // Use orderFrontRegardless + makeKey separately instead of makeKeyAndOrderFront.
         // makeKeyAndOrderFront can trigger app activation even on .nonactivatingPanel.
         // orderFrontRegardless brings the panel forward without activating the app.
@@ -242,6 +288,14 @@ class DisplayManager: ObservableObject {
         isActive = true
         statusMessage = "Active on \(screen.localizedName)"
         logger.info("Panel is now visible on Xeneon Edge")
+
+        // If the fullscreen helper briefly activated the app, yield focus back.
+        // NSApp.deactivate() lets the previously active app regain focus.
+        if fullscreenHelper != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NSApp.deactivate()
+            }
+        }
     }
 
     /// Hide the panel (but keep the screen reference).
@@ -284,7 +338,7 @@ class DisplayManager: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             // Hop back to MainActor to satisfy Swift 6 concurrency
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handleDisplayChange()
             }
         }
@@ -302,6 +356,7 @@ class DisplayManager: ObservableObject {
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
                 panel?.reposition(on: currentScreen)
                 touchRemapper.updateTargetScreen(currentScreen)
+                mouseGuard.updateEdgeScreen(currentScreen)
             }
         } else if previousScreen != nil {
             // Xeneon Edge was disconnected
@@ -315,7 +370,56 @@ class DisplayManager: ObservableObject {
 
     /// Start the touch remapper. Requests Accessibility permissions if needed
     /// and polls until granted, then automatically starts the event tap and calibration.
+    /// Request Accessibility permission upfront and call completion when granted.
+    /// This must happen BEFORE the fullscreen helper covers the Edge display,
+    /// otherwise the system permission dialog gets hidden behind the fullscreen Space.
+    func ensureAccessibilityPermission(then completion: @escaping () -> Void) {
+        // Skip permission checks in test environment
+        guard !AppEnvironment.isTesting else {
+            completion()
+            return
+        }
+
+        if touchRemapper.checkAccessibilityPermissions() {
+            accessibilityPermission = .granted
+            completion()
+            return
+        }
+
+        // Request — this shows the system dialog
+        touchRemapper.requestAccessibilityPermissions()
+        accessibilityPermission = .waiting
+        logger.info("Accessibility permission requested — waiting before fullscreen")
+
+        // Store the completion to call after permission is granted
+        accessibilityPermissionCompletion = completion
+
+        // Poll until granted
+        beginAccessibilityPermissionPolling()
+
+        // Timeout: if permission isn't granted within 8 seconds, proceed anyway.
+        // This handles the case where the binary has changed (e.g., during
+        // development) and macOS has a stale Accessibility entry — the system
+        // won't prompt again, so we'd wait forever. The panel and widgets work
+        // fine without Accessibility; only touch remapping is affected.
+        // We continue polling in the background so touch remapping starts
+        // automatically once the user fixes the permission.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+            guard let self, self.accessibilityPermissionCompletion != nil else { return }
+            self.logger.warning("Accessibility permission timeout — proceeding without touch remapping. The user may need to remove and re-add Ledge in System Settings > Privacy > Accessibility")
+            let cb = self.accessibilityPermissionCompletion
+            self.accessibilityPermissionCompletion = nil
+            cb?()
+            // Keep polling — when permission is eventually granted,
+            // startTouchRemapper() can be called from Settings or the
+            // polling callback will update the state.
+        }
+    }
+
     func startTouchRemapper() {
+        // Never attempt CGEventTap / Accessibility in test environment
+        guard !AppEnvironment.isTesting else { return }
+
         guard xeneonScreen != nil else {
             accessibilityPermission = .unknown
             logger.warning("Cannot start touch remapper: Xeneon Edge not detected")
@@ -338,12 +442,33 @@ class DisplayManager: ObservableObject {
     func stopTouchRemapper() {
         touchRemapper.stop()
         touchWatchdog.stop()
+        mouseGuard.stop()
         tearDownPermissionPolling()
         isTouchRemapperActive = false
         calibrationState = .notStarted
         learnedDeviceID = nil
         lastTouchInfo = nil
         logger.info("Touch remapper stopped")
+    }
+
+    /// Start or stop the mouse guard based on current state.
+    ///
+    /// The mouse guard requires: (1) the toggle is enabled, (2) the touch device
+    /// IDs are known (calibrated/auto-detected), and (3) the Edge screen is detected.
+    private func updateMouseGuardState() {
+        guard isMouseGuardEnabled,
+              !touchRemapper.touchDeviceIDs.isEmpty,
+              let screen = xeneonScreen else {
+            if mouseGuard.isActive {
+                mouseGuard.stop()
+            }
+            return
+        }
+
+        mouseGuard.configure(touchDeviceIDs: touchRemapper.touchDeviceIDs, edgeScreen: screen)
+        if !mouseGuard.isActive {
+            mouseGuard.start()
+        }
     }
 
     /// Start calibration — the next touch event identifies the touchscreen device.
@@ -361,6 +486,60 @@ class DisplayManager: ObservableObject {
                 self?.calibrationState = .calibrated
                 self?.learnedDeviceID = self?.touchRemapper.touchDeviceID
                 self?.logger.info("Touch calibration complete — device ID: \(self?.touchRemapper.touchDeviceID ?? -1)")
+            }
+        }
+    }
+
+    // MARK: - Accessibility Permission Gate (pre-fullscreen)
+
+    /// Poll for Accessibility permission before entering fullscreen.
+    /// Once granted, calls the stored completion and proceeds.
+    private func beginAccessibilityPermissionPolling() {
+        accessibilityGateTimer?.invalidate()
+        accessibilityGateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.touchRemapper.checkAccessibilityPermissions() {
+                    self.accessibilityGateTimer?.invalidate()
+                    self.accessibilityGateTimer = nil
+                    self.accessibilityPermission = .granted
+
+                    if let completion = self.accessibilityPermissionCompletion {
+                        // Pre-timeout: fire completion to show panel
+                        self.accessibilityPermissionCompletion = nil
+                        self.logger.info("Accessibility permission granted — proceeding with panel")
+                        completion()
+                    } else {
+                        // Post-timeout: panel already showing, start touch remapper now
+                        self.logger.info("Accessibility permission granted (late) — starting touch remapper")
+                        self.startTouchRemapper()
+                    }
+                }
+            }
+        }
+
+        // Also check on app activation (user may grant via System Settings and switch back)
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.accessibilityPermission != .granted,
+                      self.touchRemapper.checkAccessibilityPermissions() else { return }
+                self.accessibilityGateTimer?.invalidate()
+                self.accessibilityGateTimer = nil
+                self.accessibilityPermission = .granted
+
+                if let completion = self.accessibilityPermissionCompletion {
+                    self.accessibilityPermissionCompletion = nil
+                    self.logger.info("Accessibility permission granted (on activation) — proceeding with panel")
+                    completion()
+                } else {
+                    self.logger.info("Accessibility permission granted (on activation, late) — starting touch remapper")
+                    self.startTouchRemapper()
+                }
             }
         }
     }
@@ -419,6 +598,9 @@ class DisplayManager: ObservableObject {
             touchWatchdog.start(tap: tap)
         }
 
+        // Start the mouse guard if enabled and device IDs are known
+        updateMouseGuardState()
+
         if touchRemapper.isActive {
             if calibrationState == .autoDetected {
                 logger.info("Event tap active — touchscreen auto-detected, ready for input")
@@ -436,7 +618,7 @@ class DisplayManager: ObservableObject {
 
         // Poll every 2 seconds
         permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.checkAndProceedIfPermitted()
             }
         }
@@ -449,7 +631,7 @@ class DisplayManager: ObservableObject {
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.bundleIdentifier == Bundle.main.bundleIdentifier else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.checkAndProceedIfPermitted()
             }
         }
@@ -560,7 +742,7 @@ class DisplayManager: ObservableObject {
     private func beginPermissionGatePolling() {
         permissionGateTimer?.invalidate()
         permissionGateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.checkPermissionGate()
             }
         }
@@ -606,7 +788,11 @@ class DisplayManager: ObservableObject {
 
         // The helper needs .titled for toggleFullScreen to work. fullSizeContentView +
         // transparent titlebar makes the titlebar invisible. The window is entirely black
-        // and serves only to create the fullscreen Space.
+        // and serves only to create the fullscreen Space on the Edge display.
+        //
+        // This is the same mechanism used by Safari, Chrome, Parallels, etc.
+        // With "Displays have separate Spaces" enabled, the fullscreen Space on the
+        // Edge is completely independent of the primary display's Spaces.
         let helper = FullscreenHelperWindow(
             contentRect: screen.frame,
             styleMask: [.titled, .fullSizeContentView],
@@ -627,11 +813,20 @@ class DisplayManager: ObservableObject {
         // Observe fullscreen entry BEFORE triggering the transition
         observeFullscreenEntry(completion: completion)
 
-        // Show and enter fullscreen.
-        // Use orderFrontRegardless instead of orderFront to avoid activating the app.
-        NSApp.preventWindowOrdering()
-        helper.orderFrontRegardless()
+        // toggleFullScreen requires the window to be visible and the app to be
+        // momentarily active. We activate briefly, trigger fullscreen, then
+        // deactivate so the user's foreground app regains focus.
+        let previousApp = NSWorkspace.shared.frontmostApplication
+        helper.makeKeyAndOrderFront(nil)
         helper.toggleFullScreen(nil)
+
+        // Re-activate the previous app after a short delay to let the fullscreen
+        // transition begin. The transition runs asynchronously.
+        if let prevApp = previousApp, prevApp.bundleIdentifier != Bundle.main.bundleIdentifier {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                prevApp.activate()
+            }
+        }
 
         logger.info("Fullscreen helper created — entering fullscreen on \(screen.localizedName)")
     }
@@ -649,11 +844,13 @@ class DisplayManager: ObservableObject {
             object: fullscreenHelper,
             queue: .main
         ) { [weak self] _ in
-            if let obs = self?.fullscreenObserver {
-                NotificationCenter.default.removeObserver(obs)
-                self?.fullscreenObserver = nil
+            Task { @MainActor [weak self] in
+                if let obs = self?.fullscreenObserver {
+                    NotificationCenter.default.removeObserver(obs)
+                    self?.fullscreenObserver = nil
+                }
+                completion()
             }
-            completion()
         }
 
         // Fallback: if the notification never fires, show after 2 seconds
@@ -669,18 +866,58 @@ class DisplayManager: ObservableObject {
     }
 
     /// Exit fullscreen and clean up the helper window.
+    ///
+    /// `toggleFullScreen(nil)` is asynchronous — the fullscreen exit animates
+    /// over ~0.5s. If we `orderOut(nil)` immediately, the black helper window
+    /// is still visible mid-transition, leaving a black screen on the Edge.
+    ///
+    /// Fix: make the helper transparent immediately so the exit animation is
+    /// invisible, then observe `didExitFullScreen` to clean up properly.
     private func tearDownFullscreenHelper() {
         if let observer = fullscreenObserver {
             NotificationCenter.default.removeObserver(observer)
             fullscreenObserver = nil
         }
         guard let helper = fullscreenHelper else { return }
+
+        // Make the helper invisible immediately so the user doesn't see
+        // a black screen during the async fullscreen exit animation.
+        helper.alphaValue = 0
+
         if helper.styleMask.contains(.fullScreen) {
+            // Observe the exit completion to clean up
+            let exitObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
+                object: helper,
+                queue: .main
+            ) { [weak self] notification in
+                // Extract the window reference before crossing the Task boundary
+                // (Notification is non-Sendable)
+                guard let window = notification.object as? NSWindow else { return }
+                Task { @MainActor [weak self] in
+                    window.orderOut(nil)
+                    if self?.fullscreenHelper === window {
+                        self?.fullscreenHelper = nil
+                    }
+                }
+            }
+
             helper.toggleFullScreen(nil)
+
+            // Fallback: if the notification never fires, force cleanup after 2s
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                NotificationCenter.default.removeObserver(exitObserver)
+                helper.orderOut(nil)
+                if self?.fullscreenHelper === helper {
+                    self?.fullscreenHelper = nil
+                }
+            }
+        } else {
+            helper.orderOut(nil)
+            fullscreenHelper = nil
         }
-        helper.orderOut(nil)
-        fullscreenHelper = nil
-        logger.info("Fullscreen helper torn down")
+
+        logger.info("Fullscreen helper tear-down initiated")
     }
 
     // MARK: - Display Security (Sleep / Lock / Screensaver)
@@ -697,23 +934,23 @@ class DisplayManager: ObservableObject {
         // Display sleep/wake
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.blankDisplay(reason: "displays slept") }
+                Task { @MainActor [weak self] in self?.blankDisplay(reason: "displays slept") }
             }
         )
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.unblankDisplay(reason: "displays woke") }
+                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "displays woke") }
             }
         )
 
         // System sleep/wake (covers lid close, sleep menu, idle sleep)
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.blankDisplay(reason: "system sleeping") }
+                Task { @MainActor [weak self] in self?.blankDisplay(reason: "system sleeping") }
             }
         )
         securityObservers.append(
-            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
                 // Don't unblank on wake — wait for unlock. If no lock screen is configured,
                 // screensDidWake will handle it.
             }
@@ -722,24 +959,24 @@ class DisplayManager: ObservableObject {
         // Screen lock/unlock (requires login to dismiss)
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.blankDisplay(reason: "screen locked") }
+                Task { @MainActor [weak self] in self?.blankDisplay(reason: "screen locked") }
             }
         )
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.unblankDisplay(reason: "screen unlocked") }
+                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "screen unlocked") }
             }
         )
 
         // Screensaver start/stop
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didStart"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.blankDisplay(reason: "screensaver started") }
+                Task { @MainActor [weak self] in self?.blankDisplay(reason: "screensaver started") }
             }
         )
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didStop"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.unblankDisplay(reason: "screensaver stopped") }
+                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "screensaver stopped") }
             }
         )
 

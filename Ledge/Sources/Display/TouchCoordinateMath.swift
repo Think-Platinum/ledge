@@ -17,7 +17,7 @@ import AppKit
 ///
 /// All functions are pure — they take geometry parameters and return results
 /// with no side effects, making them trivially unit-testable.
-enum TouchCoordinateMath {
+nonisolated enum TouchCoordinateMath {
 
     /// Convert an NSScreen/Cocoa frame (origin bottom-left, Y up) to
     /// CG/Quartz coordinates (origin top-left, Y down).

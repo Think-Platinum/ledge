@@ -259,6 +259,11 @@ class ThemeManager {
     /// The loaded background NSImage, if any.
     var backgroundImage: NSImage? = nil
 
+    /// The macOS desktop wallpaper for the Xeneon Edge screen.
+    /// Used as a fallback when the user hasn't configured a custom background image.
+    /// Populated by `loadDesktopWallpaper(for:)` when the panel is shown.
+    var desktopWallpaper: NSImage? = nil
+
     private let key = "com.ledge.themeMode"
     private let bgStyleKey = "com.ledge.widgetBackgroundStyle"
     private let bgModeKey = "com.ledge.dashboardBackgroundMode"
@@ -307,6 +312,32 @@ class ThemeManager {
             return
         }
         backgroundImage = NSImage(contentsOfFile: backgroundImagePath)
+    }
+
+    /// Load the macOS desktop wallpaper for a given screen.
+    /// Called once when the panel is shown on the Xeneon Edge.
+    func loadDesktopWallpaper(for screen: NSScreen) {
+        guard let url = NSWorkspace.shared.desktopImageURL(for: screen) else {
+            desktopWallpaper = nil
+            return
+        }
+        // desktopImageURL may return a folder (for rotating wallpapers) or a file
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            // Folder — try to find the first image inside
+            if let contents = try? FileManager.default.contentsOfDirectory(
+                at: url, includingPropertiesForKeys: nil
+            ) {
+                let imageExtensions = Set(["jpg", "jpeg", "png", "heic", "tiff", "bmp"])
+                if let firstImage = contents.first(where: { imageExtensions.contains($0.pathExtension.lowercased()) }) {
+                    desktopWallpaper = NSImage(contentsOf: firstImage)
+                    return
+                }
+            }
+            desktopWallpaper = nil
+        } else {
+            desktopWallpaper = NSImage(contentsOf: url)
+        }
     }
 }
 

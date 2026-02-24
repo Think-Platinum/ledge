@@ -14,7 +14,7 @@ struct DateTimeWidget {
         var showDate: Bool = true
         var dateFormat: String = "EEEE, d MMMM"
         var timezone: String? = nil  // nil = local
-        var tintWithCalendarColor: Bool = true
+        var tintWithCalendarColor: Bool = false
     }
 
     static let descriptor = WidgetDescriptor(

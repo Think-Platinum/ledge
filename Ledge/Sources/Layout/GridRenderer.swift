@@ -75,9 +75,17 @@ struct GridRenderer: View {
                     )
                     .frame(width: frame.width, height: frame.height)
                     .offset(x: frame.origin.x, y: frame.origin.y)
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.85).combined(with: .opacity),
+                            removal: .scale(scale: 0.85).combined(with: .opacity)
+                        )
+                    )
                 }
+                .animation(.easeInOut(duration: 0.3), value: layout.placements.map(\.id))
             }
-            .environment(\.widgetBackgroundStyle, themeManager.widgetBackgroundStyle)
+            .environment(\.widgetBackgroundStyle,
+                         theme.preferredBackgroundStyle ?? themeManager.widgetBackgroundStyle)
         }
     }
 
@@ -86,34 +94,60 @@ struct GridRenderer: View {
         // Respect theme's preferred background style (e.g. Liquid Glass → blur)
         let bgStyle = theme.preferredBackgroundStyle ?? themeManager.widgetBackgroundStyle
 
-        switch themeManager.dashboardBackgroundMode {
-        case .themeColor:
-            if bgStyle == .solid {
-                // Solid mode: theme colour fills everything (gaps are solid)
-                theme.dashboardBackground
-            } else {
-                // Blur/Transparent mode with no image: clear background
-                // so the macOS desktop wallpaper shows through the gaps.
-                // The panel must also be non-opaque for this to work.
-                Color.clear
+        // Per-page background overrides the global setting
+        let pageImage: NSImage? = {
+            if let pagePath = layout.backgroundImagePath, !pagePath.isEmpty {
+                return NSImage(contentsOfFile: pagePath)
             }
+            return nil
+        }()
 
-        case .image:
-            if let nsImage = themeManager.backgroundImage {
-                // Background image fills the entire dashboard area.
-                // Visible through gaps in all modes; visible through
-                // widgets themselves in Blur (frosted) and Transparent modes.
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size.width, height: size.height)
-                    .clipped()
-            } else {
-                // No image loaded — fall back to the theme colour or clear
+        if let pageImage {
+            // Per-page background takes priority
+            Image(nsImage: pageImage)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size.width, height: size.height)
+                .clipped()
+        } else {
+            switch themeManager.dashboardBackgroundMode {
+            case .themeColor:
                 if bgStyle == .solid {
                     theme.dashboardBackground
+                } else if let wallpaper = themeManager.desktopWallpaper {
+                    // In fullscreen mode the desktop is hidden. When using blur/transparent
+                    // backgrounds, show the macOS wallpaper so widgets have something to blur
+                    // against (otherwise it's just black).
+                    Image(nsImage: wallpaper)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
                 } else {
                     Color.clear
+                }
+
+            case .image:
+                if let nsImage = themeManager.backgroundImage {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                } else if let wallpaper = themeManager.desktopWallpaper {
+                    // Fall back to macOS desktop wallpaper (captured from the Edge screen).
+                    // In fullscreen mode the desktop is hidden, so we reproduce it here.
+                    Image(nsImage: wallpaper)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                } else {
+                    if bgStyle == .solid {
+                        theme.dashboardBackground
+                    } else {
+                        Color.clear
+                    }
                 }
             }
         }

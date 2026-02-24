@@ -94,16 +94,16 @@ The TouchRemapper intercepts ALL mouse events from the touchscreen via a CGEvent
 
 - [ ] **Stability:** Touch mapping occasionally drops or crashes — needs investigation. May be CGEventTap getting disabled under load, or the event tap thread timing out. Flight recorder + watchdog now provide diagnostic data
 - [ ] **Focus stealing (CRITICAL):** Active application loses focus when touching the Edge. This is the #1 usability blocker. The `.nonactivatingPanel` + direct NSEvent delivery approach should prevent this, but something is still activating the app. Investigate: (a) `panel.makeKey()` in `mouseDown` — does this activate the app? (b) SwiftUI views that trigger `NSApp.activate()` internally, (c) WKWebView in the Web widget may activate the app on interaction, (d) NSAlert/NSMenu/system UI triggered by widget code. Needs systematic debugging with the Touch Diagnostics widget active
-- [ ] **Mouse cursor guard:** When the mouse (not touch) drifts onto the Edge display, it can interact with widgets. Options: (a) invisible barrier that warps cursor back, (b) ignore mouse-sourced events on the Edge, (c) leave it for Web widget convenience. **Decision pending** — useful for Web widget but undesirable for everything else
+- [x] **Mouse cursor guard:** MouseGuard.swift — separate CGEventTap that suppresses non-touchscreen mouse events landing on the Edge display. Configurable via Settings toggle "Block mouse on Edge display". Requires known touch device IDs (auto-detected or calibrated)
 - [ ] **Touch disable toggle:** Settings UI toggle to completely disable the touch event tap. Placed alongside the existing Event Tap settings. Useful for: (a) preventing accidental touches, (b) using mouse-only mode on the Edge, (c) troubleshooting touch issues. When disabled, the CGEventTap is torn down entirely — touchscreen events pass through to macOS as normal mouse events
-- [ ] **Touch visual indicator:** Visual feedback when the screen is touched — ripple or highlight effect at touch point. Especially useful for buttons. May also show swipe direction/momentum for drag gestures
+- [x] **Touch visual indicator:** TouchVisualIndicator.swift — expanding/fading white ripple circle at each touch point, overlaid on DashboardView with `.allowsHitTesting(false)`. Configurable via Settings toggle "Show touch indicator"
 - [ ] **Long-running gestures:** Volume/progress slider drags work but need more testing for reliability
 - [ ] **Event tap recovery:** If the CGEventTap is disabled by the system (timeout or user input), it re-enables — but need to verify touch state is properly reset. TouchWatchdog now detects and re-enables silently disabled taps
 - [ ] **Multi-touch:** Not available on macOS via USB touchscreen — single-point only. Design all widgets for single-tap/drag interaction
 - [ ] **Comprehensive testing:** Systematic test plan needed — tap, drag, rapid taps, app switching during touch, sleep/wake with active touch, display disconnect during touch
-- [ ] **Separate Spaces per display:** macOS "Displays have separate Spaces" setting may break fullscreen panel behaviour on the Xeneon Edge. Needs systematic testing — panel visibility, Space switching, Mission Control interaction, fullscreen apps on primary display
+- [x] **Separate Spaces per display:** Resolved — fullscreen helper window enters native fullscreen on the Edge, creating a dedicated Space that auto-hides the menu bar. With "Displays have separate Spaces" enabled, each display is independent. Accessibility permission is requested before the fullscreen transition to prevent dialog occlusion
 
-## Phase 3: Visual Polish & UX 📋 NEXT UP
+## Phase 3: Visual Polish & UX ✅ COMPLETE
 
 **Goal:** A visually polished, daily-drivable application with refined transitions and a cohesive design language.
 
@@ -120,28 +120,54 @@ The TouchRemapper intercepts ALL mouse events from the touchscreen via a CGEvent
 - [x] **Transparent widget backgrounds with blur** — `NSVisualEffectView` integration via `VisualEffectBlur` SwiftUI wrapper. Three widget background modes: Solid, Blur, Transparent. Configurable in Settings > Appearance
 - [x] **Liquid Glass design language** — new default theme with frosted blur backgrounds, specular top-edge highlight (LinearGradient inner glow), drop shadow, 16pt continuous corner radius. Theme system extended with glass-specific properties (`glassInnerGlow`, `glassHighlightColor`, `glassShadowRadius`, `preferredBackgroundStyle`). Auto-enables blur when active. Classic themes preserved as alternatives
 - [x] **Background images** — configurable wallpapers behind the widget grid via Settings > Appearance. Supports any image file; recommends 2560×720 for Xeneon Edge. Corsair iCUE wallpapers work well
-- [ ] **Widget transitions** — smooth animations when switching layouts, adding/removing widgets
+- [x] **Widget transitions** — smooth directional slide animations when switching pages (`withAnimation` + `AnyTransition.asymmetric` with `.move(edge:)`), scale+fade when adding/removing widgets
+- [x] **Desktop wallpaper fallback** — when in fullscreen mode (desktop hidden), Ledge reads the macOS desktop wallpaper for the Edge via `NSWorkspace.desktopImageURL(for:)` and uses it as the background when no custom image is configured. Especially useful for blur/transparent themes
+
+### Fullscreen Display Management
+
+- [x] **Native fullscreen via helper window** — enters macOS native fullscreen on the Edge display using a `FullscreenHelperWindow`. Creates a dedicated fullscreen Space that auto-hides the menu bar, same approach as Safari/Chrome/Parallels. The LedgePanel renders on top via `.fullScreenAuxiliary` collection behavior
+- [x] **Independent Spaces support** — with "Displays have separate Spaces" enabled, the Edge's fullscreen Space is completely independent of the primary display. Space switching on the primary does not affect the Edge
+- [x] **Accessibility permission gate** — system permission dialogs are requested and resolved BEFORE the fullscreen transition, preventing them from being hidden behind the fullscreen Space
 
 ### Multiple Pages (Swipeable Layouts)
 
 - [x] Page indicator on the Edge (dot-style capsule, fades in on page switch, subtle at rest)
 - [x] Swipe gesture to switch between saved layouts (dampened drag + threshold, wraps around)
 - [x] `LayoutManager` page navigation: `nextPage()`, `previousPage()`, `switchToPage(_:)`, `activePageIndex`, `pageCount`
-- [ ] Optional auto-rotation on timer
-- [ ] Per-page background image support
-- [ ] Settings UI for page ordering and management
+- [x] Optional auto-rotation on timer — configurable interval (10s to 5min), resets on manual swipe
+- [x] Per-page background image support — each page can override the global background
+- [x] Consolidated "Widgets & Layout" settings panel — page selector tabs with context menu (rename, duplicate, set background, delete), interactive grid editor, widget list with click-to-configure
 
 **Note:** `LayoutManager` already supports multiple saved layouts with create/switch/delete. Pages are now swipeable on the Edge with a visual indicator.
 
-### Widget Gallery Improvements
+### Widget Gallery & Settings Improvements
 
 - [x] Visual card-based gallery with 2-column grid
 - [x] Category filtering (Media, Productivity, System, Smart Home, Info, Web)
 - [x] Search bar
 - [x] "Already added" badges
 - [x] Hover effects and category-coloured icons
-- [ ] Widget preview thumbnails (render a small snapshot of each widget)
-- [ ] Widget configuration from the layout editor (tap a placed widget → settings popover)
+- [x] Widget preview thumbnails — live miniature widget renderings in the gallery cards
+- [x] Widget position/size controls (DisclosureGroup, collapsed by default — for fine-tuning)
+- [x] Widget-specific settings accessible from layout editor
+- [x] System Performance widget data persistence — shared singleton history store survives page changes
+- [x] Grid editor drag/resize jitter fix — animations disabled during active gestures
+- [x] Settings panel reliability — `isReleasedWhenClosed = false` pinning, retry logic for window lifecycle
+
+### Remaining Polish (Future)
+
+- [ ] Widget configuration from the layout editor (tap a placed widget → settings popover on the Edge itself, not just Settings window)
+- [ ] **Panel loses fullscreen when settings window is closed** — closing the Settings window causes the Xeneon Edge panel to drop out of fullscreen and the menu bar to reappear. Workaround: toggle the panel off and back on. Likely cause: `updateActivationPolicy()` in AppDelegate switches from `.regular` to `.accessory` when the settings window closes, which disrupts the LedgePanel's fullscreen state. Fix: re-assert the panel's window level, collection behavior, and frame after the activation policy switch, or skip the policy change entirely when the panel is active
+- [ ] **Panel position bug on display config change** — when the screen configuration changes (adding/removing a display, rearranging displays), the panel doesn't reposition correctly on the Xeneon Edge. Current workaround: toggle the panel off and back on. The `handleDisplayChange()` in DisplayManager calls `panel?.reposition(on:)` but this may not account for the fullscreen helper needing to be torn down and recreated, or the screen frame changing before the notification fires. Needs investigation — may need to tear down and rebuild the full panel + fullscreen helper stack on display reconfiguration. **Related fix applied:** toggling the panel off now properly tears down the fullscreen helper (previously left a black screen — `toggleFullScreen` exit is async, `orderOut` was firing too early)
+- [ ] **Background mode override** — when the user selects "Theme Color" background mode (not image/blur), the dashboard should show the theme's solid `dashboardBackground` colour, NOT the desktop wallpaper fallback. The wallpaper fallback should only apply when using blur/transparent widget backgrounds with no custom image set. Currently the wallpaper shows through even on solid themes like Forest
+- [ ] **Tighter widget grid gap** — reduce the gap between widgets (currently 8pt) for a denser, more cohesive layout. Consider making it configurable or reducing to ~4–5pt
+- [ ] **Weather widget — more data** — the current layout has unused space. Add rainfall/precipitation data: (a) next-hour rainfall forecast in the gap between current temp and conditions (top-middle area), (b) daily rainfall amounts in the forecast row below. WeatherKit provides `precipitationAmount`, `precipitationChance`, and minute-by-minute precipitation forecasts via `MinuteWeather`. Also consider filling the space below the 7-day forecast row with additional data (UV index, sunrise/sunset, air quality if available)
+- [ ] **Spotify marquee text bug** — long track titles and album names are not scrolling (marquee animation not triggering). The overflow threshold check or animation may be broken — needs investigation
+- [ ] **DateTime widget — multiple styles** — currently only one look. Add configurable display modes: analogue clock face, different digital font styles (thin/bold/retro/monospaced), show/hide seconds, 12h/24h toggle, date format options. Could also support different clock face designs (minimal, classic, numbered). Make it feel like a proper customisable watch face
+- [ ] **System Performance — utilisation-coloured graph lines** — the sparkline graph line and shaded fill area should change colour based on the current utilisation level, matching the colour of the sliding bar beneath (e.g., green at low usage → amber at moderate → red at high). Currently the line colour is static per metric
+- [ ] **Launch visualization — water settling effect** — when the dashboard first appears (app launch or panel show), animate a visual effect that looks like a pool of water settling into place. Could use `TimelineView` with a custom shader or layered wave animations that dampen over ~1.5 seconds. Gives the dashboard a premium, tactile feel on first load
+- [ ] **Periodic shimmer across widgets** — a configurable subtle shimmer/light sweep that periodically moves across the widget grid. Helps minimize OLED burn-in by gently shifting pixel values. Configurable in Settings: enabled/disabled, interval (e.g. every 30s, 1min, 5min), intensity. Implemented as a semi-transparent gradient overlay that animates horizontally across the dashboard
+- [ ] **Widget selector previews leak sensitive data** — the widget picker/selector in the layout editor shows live thumbnail previews of widgets, which can include sensitive personal data (e.g. calendar event titles, meeting details). Previews should use placeholder/sample data instead of live data, or be replaced with static mockup images per widget type
 
 ## Phase 4: New Widgets 📋 PLANNED
 
@@ -195,8 +221,29 @@ Hook into the Microsoft Teams PWA (Progressive Web App running in browser) for m
 
 ### System Audio Widget Improvements
 
+- [ ] **Layout redesign** — the current wide layout feels sparse and dull. Better use of space: larger volume slider with more prominent track, bigger mute/mic/camera buttons with labels, possibly a visual volume arc or level meter. Make it feel like a proper mixing console strip rather than a thin control bar
 - [ ] **Larger button touch targets** — increase button sizes for reliable touch interaction on the Xeneon Edge (minimum 44pt, ideally 48pt+)
 - [ ] **Visual feedback on tap** — highlight/scale animation when buttons are pressed
+
+### Game/App Companion Dashboards
+
+Full-panel dashboards designed for specific games or apps, occupying an entire page. The Edge becomes a dedicated second-screen companion — game maps, stats, build info, timers, cooldowns, etc.
+
+- [ ] **Framework for full-page app companions** — a special widget type (or page mode) that consumes the entire 2560×720 panel. Placed on its own page so the user swipes to it when in-game
+- [ ] **Game data ingestion** — investigate macOS-compatible approaches: (a) reading game log files / memory-mapped data, (b) companion app APIs (many games expose REST/WebSocket APIs for overlays), (c) OCR on game window as a last resort, (d) integration with existing overlay frameworks
+- [ ] **Example: macOS-native game companion** — pick a popular macOS game (e.g., World of Warcraft, Dota 2, CS2, Final Fantasy XIV) that exposes companion data and build a proof-of-concept dashboard with map, stats, timers
+- [ ] **Community/plugin angle** — this is a strong use case for the future plugin system (Phase 5). Let the community build game-specific companions as `.ledgewidget` bundles. Provide a companion SDK with helpers for common patterns (timers, stat bars, minimaps, item grids)
+- [ ] **Non-gaming companions** — same concept applies to productivity apps: DAW mixer views, video editing timeline, IDE build status, stock trading dashboard
+
+### Context-Aware / App-Aware Widgets
+
+Widgets that detect the active foreground app (via `NSWorkspace.shared.frontmostApplication`) and dynamically show relevant shortcuts, controls, or info for that app.
+
+- [ ] **Active-app detection** — observe `NSWorkspace.didActivateApplicationNotification` to track the current foreground app. Publish to widgets via an environment object or shared service
+- [ ] **App-specific shortcut panels** — configurable per-app shortcut grids: e.g., Gmail shortcuts when Chrome/Gmail is active, Word formatting shortcuts when MS Word is active, Photoshop tool palette when Photoshop is active. User maps app bundle IDs to shortcut sets
+- [ ] **Auto-switching pages** — optionally auto-switch to a specific Ledge page when a configured app comes to the foreground (e.g., swipe to the "Music Production" page when Logic Pro is active)
+- [ ] **Keyboard shortcut execution** — send keystrokes to the foreground app via CGEvent key events. The Edge becomes a touch-friendly shortcut bar for any app
+- [ ] **App-aware widget states** — existing widgets could adapt: e.g., the Spotify widget could auto-expand when Spotify is in the foreground, or the Calendar widget could highlight the current meeting when Zoom/Teams is active
 
 ### Other Widget Ideas
 
@@ -206,6 +253,13 @@ Hook into the Microsoft Teams PWA (Progressive Web App running in browser) for m
 - [ ] Countdown timer / Pomodoro
 - [ ] Notes / sticky notes
 - [ ] System shortcuts (sleep, lock, screenshot, Do Not Disturb toggle)
+- [ ] **Photos slideshow widget** — cycles through photos from a configured folder or macOS Photos library. Crossfade transitions, configurable interval, Ken Burns pan/zoom effect. Fits well on the ultrawide as a digital photo frame when not actively using other widgets
+- [ ] **Notifications widget / toast system** — mirror or extend macOS notifications onto the Edge. Two modes: (a) toast-style banners that slide in and auto-dismiss (enhancing the standard macOS notification flow), (b) persistent list mode where notifications stack up and remain visible until manually acknowledged/dismissed on the Edge. Could use `NSUserNotificationCenter` or the newer `UNUserNotificationCenter` observation APIs, or DistributedNotificationCenter to listen for system notification events. Investigate feasibility — macOS notification access is sandboxed so may need to observe via Accessibility or a notification service extension
+- [ ] **Persistent bottom ticker strip** — a scrolling marquee banner fixed to the very bottom of the panel, running independently of the widget grid. Configurable data sources that scroll in a continuous loop: news headlines (RSS/Atom), stock prices, sports scores, custom text, or any user-configured feed. Always visible across all pages, sitting below the grid (reserve ~30–40px at the bottom). Tap to pause, tap an item to open detail or link. Supports multiple feed types mixed together (e.g., news + stocks interleaved). This is separate from and supersedes the standalone news/stock ticker widgets — those could still exist as in-grid alternatives for users who prefer them
+- [ ] **News ticker widget** — scrolling news headlines within a standard widget cell. RSS/Atom feed ingestion with configurable sources (BBC, Reuters, tech blogs, etc.). Tap a headline to open the article in the Web widget or default browser. See also: persistent bottom ticker strip for a full-width alternative
+- [ ] **Stock ticker / watchlist widget** — live stock prices within a standard widget cell. Show ticker symbol, price, change (%), sparkline mini-chart. Grid/list mode for a focused watchlist. Data sources: Yahoo Finance API (free, unofficial), Alpha Vantage (free tier), or Finnhub (free WebSocket streaming for real-time). Colour-coded green/red for up/down. Tap a ticker for expanded detail view. See also: persistent bottom ticker strip for a scrolling tape alternative
+- [ ] **Flight Radar widget** — live flight tracker showing aircraft within a configurable radius of the user's current location. Uses the OpenSky Network API (free, no auth required) or ADS-B Exchange API for real-time flight data. Display as a radar-style map or list view with flight number, airline, altitude, speed, origin/destination. CoreLocation for user position. The ultrawide format is perfect for a wide radar sweep or a scrolling flight list. Could also show a minimap with aircraft positions
+- [ ] **Carrot Weather widget** — integration with Carrot Weather for a richer, more personality-driven weather display. Carrot's snarky commentary on conditions would be great on the Edge. Investigate: (a) Carrot Weather API (requires user to have an active Carrot subscription/license — need auth flow), (b) whether Carrot exposes data via URL schemes, Shortcuts actions, or a local API on macOS, (c) displaying Carrot's unique quips/commentary alongside standard weather data. Could be offered as an alternative to the built-in WeatherKit widget for Carrot subscribers
 
 ## Phase 5: Hardware Control 📋 PLANNED
 
@@ -371,7 +425,7 @@ CGEventTap and USB HID access require App Sandbox to be disabled, which **preven
 | SwiftUI performance at 2560×720 | Janky animations | Not yet profiled — monitor as widget count grows |
 | Plugin system security | Malicious code | **Deferred** — keeping widgets built-in for now |
 | Mouse cursor wandering onto Edge | Unintended widget interaction | **Under consideration** — useful for Web widget, problematic otherwise |
-| "Displays have separate Spaces" setting | Panel may not show on Edge, Space switching issues | **Untested** — needs investigation with the setting enabled |
+| "Displays have separate Spaces" setting | Menu bar on Edge, Space switching | **Resolved** — fullscreen helper creates a dedicated Space on Edge, independent of primary display. Accessibility permission gated before fullscreen transition |
 
 ---
 

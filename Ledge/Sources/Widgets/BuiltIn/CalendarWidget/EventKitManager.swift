@@ -26,8 +26,8 @@ class EventKitManager {
 
     /// Request calendar access and begin fetching events.
     func requestAccess() {
-        store.requestFullAccessToEvents { [weak self] granted, error in
-            Task { @MainActor in
+        store.requestFullAccessToEvents { granted, error in
+            Task { @MainActor [weak self] in
                 self?.hasAccess = granted
                 if granted {
                     self?.fetchEvents()
@@ -42,8 +42,8 @@ class EventKitManager {
             forName: .EKEventStoreChanged,
             object: store,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
+        ) { _ in
+            Task { @MainActor [weak self] in
                 self?.fetchEvents()
             }
         }

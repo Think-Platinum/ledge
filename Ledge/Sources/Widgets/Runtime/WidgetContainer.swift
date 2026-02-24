@@ -77,7 +77,7 @@ struct WidgetContainer: View {
             ZStack {
                 VisualEffectBlur(
                     material: .hudWindow,
-                    blendingMode: .behindWindow,
+                    blendingMode: .withinWindow,
                     state: .active
                 )
                 // Tinted overlay to give the glass a subtle colour wash

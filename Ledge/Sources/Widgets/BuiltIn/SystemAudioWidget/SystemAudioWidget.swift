@@ -1,6 +1,66 @@
 import SwiftUI
 import Combine
 
+// MARK: - Always-Active Slider
+
+/// A custom slider that never dims when the window is inactive.
+///
+/// The standard SwiftUI `Slider` inherits AppKit's inactive-window dimming,
+/// which makes it grey out whenever Ledge isn't the active app (i.e. almost
+/// always, since LedgePanel uses `.nonactivatingPanel`). This replacement
+/// renders identically but ignores window activation state.
+private struct AlwaysActiveSlider: View {
+    @Binding var value: Double
+    var range: ClosedRange<Double> = 0...1
+    var tint: Color = .blue
+
+    @State private var isDragging = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackHeight: CGFloat = 5
+            let thumbSize: CGFloat = 18
+            let fraction = CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound))
+            let usableWidth = geo.size.width - thumbSize
+            let thumbX = thumbSize / 2 + fraction * usableWidth
+
+            ZStack(alignment: .leading) {
+                // Track background
+                Capsule()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(height: trackHeight)
+
+                // Filled track
+                Capsule()
+                    .fill(tint)
+                    .frame(width: max(0, thumbX), height: trackHeight)
+
+                // Thumb
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .offset(x: thumbX - thumbSize / 2)
+            }
+            .frame(height: geo.size.height)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        isDragging = true
+                        let x = drag.location.x - thumbSize / 2
+                        let pct = Double(x / usableWidth)
+                        value = min(range.upperBound, max(range.lowerBound, range.lowerBound + pct * (range.upperBound - range.lowerBound)))
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+        }
+        .frame(height: 24)
+    }
+}
+
 /// System audio widget with volume control, sound mute, and microphone mute.
 ///
 /// Size-adaptive: shows all controls in larger sizes, compact layout in small sizes.
@@ -75,7 +135,7 @@ struct SystemAudioWidgetView: View {
                         .foregroundColor(theme.secondaryText)
                 }
 
-                Slider(
+                AlwaysActiveSlider(
                     value: Binding(
                         get: { Double(audioState.outputVolume) },
                         set: { newVal in
@@ -83,9 +143,8 @@ struct SystemAudioWidgetView: View {
                             bridge.setOutputVolume(Float(newVal))
                         }
                     ),
-                    in: 0...1
+                    tint: audioState.isOutputMuted ? .red : theme.accent
                 )
-                .tint(audioState.isOutputMuted ? .red : theme.accent)
             }
 
             Divider().background(theme.tertiaryText.opacity(0.3))
@@ -147,7 +206,7 @@ struct SystemAudioWidgetView: View {
                     .foregroundColor(audioState.isOutputMuted ? .red : theme.primaryText)
                     .frame(width: 24)
 
-                Slider(
+                AlwaysActiveSlider(
                     value: Binding(
                         get: { Double(audioState.outputVolume) },
                         set: { newVal in
@@ -155,9 +214,8 @@ struct SystemAudioWidgetView: View {
                             bridge.setOutputVolume(Float(newVal))
                         }
                     ),
-                    in: 0...1
+                    tint: audioState.isOutputMuted ? .red : theme.accent
                 )
-                .tint(audioState.isOutputMuted ? .red : theme.accent)
 
                 Text(String(format: "%.0f%%", audioState.outputVolume * 100))
                     .font(.system(size: 13, design: .monospaced))

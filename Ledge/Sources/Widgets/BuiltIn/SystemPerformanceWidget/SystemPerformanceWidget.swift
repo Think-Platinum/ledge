@@ -11,6 +11,46 @@ struct SystemPerformanceWidget {
         var showNetwork: Bool = true
     }
 
+    /// Shared history store that survives page changes.
+    /// When the widget view is destroyed (page switch), data lives here.
+    /// When a new view appears, it reads from this store immediately.
+    @MainActor
+    final class SharedHistory {
+        static let shared = SharedHistory()
+
+        var metrics = SystemPerformanceProvider.Metrics()
+        var cpuHistory: [Double] = []
+        var memHistory: [Double] = []
+        var diskReadHistory: [Double] = []
+        var diskWriteHistory: [Double] = []
+        var downloadHistory: [Double] = []
+        var uploadHistory: [Double] = []
+
+        let maxHistory = 60
+
+        func append(_ m: SystemPerformanceProvider.Metrics) {
+            metrics = m
+
+            cpuHistory.append(m.cpuUsage / 100.0)
+            if cpuHistory.count > maxHistory { cpuHistory.removeFirst() }
+
+            memHistory.append(m.memoryPercent / 100.0)
+            if memHistory.count > maxHistory { memHistory.removeFirst() }
+
+            diskReadHistory.append(m.diskReadBytesPerSec)
+            if diskReadHistory.count > maxHistory { diskReadHistory.removeFirst() }
+
+            diskWriteHistory.append(m.diskWriteBytesPerSec)
+            if diskWriteHistory.count > maxHistory { diskWriteHistory.removeFirst() }
+
+            downloadHistory.append(m.networkDownBytesPerSec)
+            if downloadHistory.count > maxHistory { downloadHistory.removeFirst() }
+
+            uploadHistory.append(m.networkUpBytesPerSec)
+            if uploadHistory.count > maxHistory { uploadHistory.removeFirst() }
+        }
+    }
+
     static let descriptor = WidgetDescriptor(
         typeID: "com.ledge.system-performance",
         displayName: "System Performance",
@@ -37,7 +77,8 @@ struct SystemPerformanceWidgetView: View {
     let configStore: WidgetConfigStore
 
     @State private var config = SystemPerformanceWidget.Config()
-    private let provider = SystemPerformanceProvider()
+    private let provider = SystemPerformanceProvider.shared
+    private let history = SystemPerformanceWidget.SharedHistory.shared
 
     @State private var metrics = SystemPerformanceProvider.Metrics()
     @State private var cpuHistory: [Double] = []
@@ -47,7 +88,6 @@ struct SystemPerformanceWidgetView: View {
     @State private var downloadHistory: [Double] = []
     @State private var uploadHistory: [Double] = []
 
-    private let maxHistory = 60
     private let pollTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -62,6 +102,7 @@ struct SystemPerformanceWidgetView: View {
         }
         .onAppear {
             loadConfig()
+            restoreFromSharedHistory()
             refreshMetrics()
         }
         .onReceive(pollTimer) { _ in refreshMetrics() }
@@ -199,6 +240,18 @@ struct SystemPerformanceWidgetView: View {
 
     // MARK: - Helpers
 
+    /// Restore metrics and history from the shared store on appear.
+    /// This preserves data across page switches where the view is destroyed/recreated.
+    private func restoreFromSharedHistory() {
+        metrics = history.metrics
+        cpuHistory = history.cpuHistory
+        memHistory = history.memHistory
+        diskReadHistory = history.diskReadHistory
+        diskWriteHistory = history.diskWriteHistory
+        downloadHistory = history.downloadHistory
+        uploadHistory = history.uploadHistory
+    }
+
     private func refreshMetrics() {
         let p = provider
         Task.detached {
@@ -206,23 +259,16 @@ struct SystemPerformanceWidgetView: View {
             await MainActor.run {
                 metrics = m
 
-                cpuHistory.append(m.cpuUsage / 100.0)
-                if cpuHistory.count > maxHistory { cpuHistory.removeFirst() }
+                // Update shared history (survives page changes)
+                history.append(m)
 
-                memHistory.append(m.memoryPercent / 100.0)
-                if memHistory.count > maxHistory { memHistory.removeFirst() }
-
-                diskReadHistory.append(m.diskReadBytesPerSec)
-                if diskReadHistory.count > maxHistory { diskReadHistory.removeFirst() }
-
-                diskWriteHistory.append(m.diskWriteBytesPerSec)
-                if diskWriteHistory.count > maxHistory { diskWriteHistory.removeFirst() }
-
-                downloadHistory.append(m.networkDownBytesPerSec)
-                if downloadHistory.count > maxHistory { downloadHistory.removeFirst() }
-
-                uploadHistory.append(m.networkUpBytesPerSec)
-                if uploadHistory.count > maxHistory { uploadHistory.removeFirst() }
+                // Sync local @State arrays for rendering
+                cpuHistory = history.cpuHistory
+                memHistory = history.memHistory
+                diskReadHistory = history.diskReadHistory
+                diskWriteHistory = history.diskWriteHistory
+                downloadHistory = history.downloadHistory
+                uploadHistory = history.uploadHistory
             }
         }
     }
