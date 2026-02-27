@@ -859,6 +859,7 @@ struct SpotifyWidgetView: View {
         if useWebAPI, let api = webAPI {
             // Web API path — async, no AppleScript
             Task {
+                defer { isRefreshing = false }
                 do {
                     if let playback = try await api.getPlaybackState() {
                         isSpotifyRunning = true
@@ -875,19 +876,32 @@ struct SpotifyWidgetView: View {
                         deviceName = playback.device?.name ?? ""
                         deviceType = playback.device?.type ?? ""
                     } else {
-                        // No active playback but API responded
+                        // No active playback but API responded (204 No Content)
                         isSpotifyRunning = true
                         state = SpotifyBridge.PlaybackState()
                         deviceName = ""
                         deviceType = ""
                     }
+                } catch SpotifyWebAPI.SpotifyAPIError.noActiveDevice {
+                    // 404 = no active device — Spotify is running, just nothing playing
+                    isSpotifyRunning = true
+                    state = SpotifyBridge.PlaybackState()
+                    deviceName = ""
+                    deviceType = ""
                 } catch {
-                    // API error — could be no active device
-                    isSpotifyRunning = false
+                    // Real API error — fall back to AppleScript to check local Spotify
+                    let b = bridge
+                    let running = await Task.detached { b.isSpotifyRunning() }.value
+                    isSpotifyRunning = running
+                    if running {
+                        let newState = await Task.detached { b.fetchPlaybackState() }.value
+                        state = newState
+                    } else {
+                        state = SpotifyBridge.PlaybackState()
+                    }
                     deviceName = ""
                     deviceType = ""
                 }
-                isRefreshing = false
             }
         } else {
             // AppleScript path — original behaviour

@@ -37,6 +37,11 @@ struct TouchDiagnosticsWidgetView: View {
         GeometryReader { geo in
             let compact = geo.size.height < 200
             VStack(alignment: .leading, spacing: compact ? 3 : 6) {
+                // Alert banner if touch is unhealthy
+                if !displayManager.touchWatchdog.isTapHealthy || displayManager.touchWatchdog.isDeadTapDetected {
+                    alertBanner
+                }
+                
                 statusRow
                 statsRow
                 if !compact {
@@ -50,6 +55,59 @@ struct TouchDiagnosticsWidgetView: View {
         .onReceive(refreshTimer) { _ in
             tick += 1
         }
+    }
+
+    // MARK: - Alert Banner
+
+    private var alertBanner: some View {
+        let watchdog = displayManager.touchWatchdog
+        
+        return HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 14))
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(watchdog.healthStatus)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundColor(.orange)
+                
+                if watchdog.isDeadTapDetected {
+                    Text("Quiet for \(watchdog.consecutiveQuietChecks * 3)s — tap may have crashed")
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                    Text("Toggle panel OFF/ON or tap to retry")
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                } else if !watchdog.isTapHealthy {
+                    Text("Auto-recovery attempted \(watchdog.disableCount)×")
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+            
+            Spacer()
+            
+            // Manual recovery button
+            Button(action: {
+                displayManager.touchWatchdog.forceRecovery()
+            }) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12))
+                    .foregroundColor(.white)
+                    .padding(6)
+                    .background(Color.orange.opacity(0.3))
+                    .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.15))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.orange.opacity(0.4), lineWidth: 1)
+        )
     }
 
     // MARK: - Status Row
@@ -74,8 +132,8 @@ struct TouchDiagnosticsWidgetView: View {
             )
             statusDot(
                 "WD",
-                active: displayManager.touchWatchdog.isTapHealthy,
-                warning: false
+                active: displayManager.touchWatchdog.isTapHealthy && !displayManager.touchWatchdog.isDeadTapDetected,
+                warning: displayManager.touchWatchdog.isDeadTapDetected
             )
 
             Spacer()
@@ -113,6 +171,12 @@ struct TouchDiagnosticsWidgetView: View {
             if watchdog.disableCount > 0 {
                 statLabel("wd", value: "\(watchdog.disableCount)×")
                     .foregroundColor(.orange)
+            }
+            
+            // Show quiet counter when events stop
+            if watchdog.consecutiveQuietChecks > 0 && recorder.totalRecorded > 0 {
+                statLabel("quiet", value: "\(watchdog.consecutiveQuietChecks * 3)s")
+                    .foregroundColor(watchdog.isDeadTapDetected ? .red : .yellow)
             }
 
             Spacer()

@@ -126,7 +126,7 @@ The touch pipeline is managed by `DisplayManager` and has automatic permission h
 
 ## Documentation
 
-Detailed design docs in `docs/`:
+Detailed design docs in `Ledge/docs/`:
 - `OVERVIEW.md` — Problem, goals, hardware specs, research links
 - `ARCHITECTURE.md` — Layered design, component responsibilities, tech choices
 - `FOCUS_MANAGEMENT.md` — NSPanel, touch remapping, edge cases (text input, context menus)

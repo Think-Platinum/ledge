@@ -579,6 +579,11 @@ class DisplayManager: ObservableObject {
             )
             self?.flightRecorder.append(entry)
 
+            // Notify watchdog of event activity (heartbeat for dead tap detection)
+            Task { @MainActor in
+                self?.touchWatchdog.recordEventActivity()
+            }
+
             // Update UI state on MainActor
             Task { @MainActor in
                 self?.lastTouchInfo = TouchEventInfo(
@@ -596,6 +601,14 @@ class DisplayManager: ObservableObject {
         // Start the watchdog to monitor event tap health
         if let tap = touchRemapper.eventTap {
             touchWatchdog.start(tap: tap)
+            
+            // Wire watchdog callbacks for enhanced monitoring
+            touchWatchdog.getLastEventTimestamp = { [weak self] in
+                self?.flightRecorder.recentEntries(count: 1).last?.timestamp
+            }
+            touchWatchdog.getTotalEventCount = { [weak self] in
+                self?.flightRecorder.totalRecorded ?? 0
+            }
         }
 
         // Start the mouse guard if enabled and device IDs are known

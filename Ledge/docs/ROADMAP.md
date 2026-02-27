@@ -84,21 +84,25 @@ The TouchRemapper intercepts ALL mouse events from the touchscreen via a CGEvent
 
 - [x] **TouchCoordinateMath** — extracted pure coordinate transformation functions (testable without live displays)
 - [x] **TouchFlightRecorder** — ring buffer of last 500 touch events with device ID, coordinates, delivery status, latency
-- [x] **TouchWatchdog** — independent 5-second timer monitoring CGEventTap health, auto-re-enables if silently disabled
+- [x] **TouchWatchdog** — independent 3-second timer monitoring CGEventTap health, auto-re-enables if silently disabled
+- [x] **Dead tap detection** — watchdog now detects when tap is enabled but not receiving events (crashed thread), alerts user after 12s of silence
+- [x] **Heartbeat monitoring** — every touch event notifies watchdog, consecutive quiet checks tracked
+- [x] **Manual recovery** — force tap disable/re-enable cycle from diagnostic widget
 - [x] **Delivery confirmation** — LedgePanel tracks received event count for drop detection
-- [x] **Touch Diagnostics widget** (`com.ledge.touch-diagnostics`) — real-time pipeline health, stats, and event log
+- [x] **Touch Diagnostics widget** (`com.ledge.touch-diagnostics`) — real-time pipeline health, stats, event log, and proactive alerts
+- [x] **Visual health alerts** — orange banner in diagnostic widget when tap is disabled or dead, with recovery button
 - [x] **Panel alignment bug fix** — `TouchRemapper.targetScreen` now updated on display rearrangement (was stale after screen config change)
 - [x] **XCTest target** — unit tests for coordinate math (remap, CG↔Cocoa conversion, window-local transform)
 
 ### Touch Known Issues & Open Work
 
-- [ ] **Stability:** Touch mapping occasionally drops or crashes — needs investigation. May be CGEventTap getting disabled under load, or the event tap thread timing out. Flight recorder + watchdog now provide diagnostic data
+- [x] **Stability monitoring:** Touch mapping can occasionally drop or crash — now detectable! Enhanced watchdog monitors for "dead tap syndrome" where the CGEventTap is enabled but no events arrive. After 12s of silence, the Touch Diagnostics widget shows an alert with recovery options. See `TOUCH_HEALTH_MONITORING.md` for details
 - [ ] **Focus stealing (CRITICAL):** Active application loses focus when touching the Edge. This is the #1 usability blocker. The `.nonactivatingPanel` + direct NSEvent delivery approach should prevent this, but something is still activating the app. Investigate: (a) `panel.makeKey()` in `mouseDown` — does this activate the app? (b) SwiftUI views that trigger `NSApp.activate()` internally, (c) WKWebView in the Web widget may activate the app on interaction, (d) NSAlert/NSMenu/system UI triggered by widget code. Needs systematic debugging with the Touch Diagnostics widget active
 - [x] **Mouse cursor guard:** MouseGuard.swift — separate CGEventTap that suppresses non-touchscreen mouse events landing on the Edge display. Configurable via Settings toggle "Block mouse on Edge display". Requires known touch device IDs (auto-detected or calibrated)
 - [ ] **Touch disable toggle:** Settings UI toggle to completely disable the touch event tap. Placed alongside the existing Event Tap settings. Useful for: (a) preventing accidental touches, (b) using mouse-only mode on the Edge, (c) troubleshooting touch issues. When disabled, the CGEventTap is torn down entirely — touchscreen events pass through to macOS as normal mouse events
 - [x] **Touch visual indicator:** TouchVisualIndicator.swift — expanding/fading white ripple circle at each touch point, overlaid on DashboardView with `.allowsHitTesting(false)`. Configurable via Settings toggle "Show touch indicator"
 - [ ] **Long-running gestures:** Volume/progress slider drags work but need more testing for reliability
-- [ ] **Event tap recovery:** If the CGEventTap is disabled by the system (timeout or user input), it re-enables — but need to verify touch state is properly reset. TouchWatchdog now detects and re-enables silently disabled taps
+- [x] **Event tap recovery:** CGEventTap is automatically re-enabled if disabled by the system, and dead tap detection now alerts when the tap crashes
 - [ ] **Multi-touch:** Not available on macOS via USB touchscreen — single-point only. Design all widgets for single-tap/drag interaction
 - [ ] **Comprehensive testing:** Systematic test plan needed — tap, drag, rapid taps, app switching during touch, sleep/wake with active touch, display disconnect during touch
 - [x] **Separate Spaces per display:** Resolved — fullscreen helper window enters native fullscreen on the Edge, creating a dedicated Space that auto-hides the menu bar. With "Displays have separate Spaces" enabled, each display is independent. Accessibility permission is requested before the fullscreen transition to prevent dialog occlusion

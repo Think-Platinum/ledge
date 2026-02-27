@@ -507,147 +507,169 @@ private struct BandwidthGraphView: View {
     private let downloadColor: Color = .cyan
     private let uploadColor: Color = .orange
 
+    /// Pre-normalize both histories against their shared max for animation.
+    /// This lets the animatable shapes interpolate normalized 0–1 values.
+    private var maxVal: Double {
+        max(downloadHistory.max() ?? 0, uploadHistory.max() ?? 0, 1024)
+    }
+
+    private var normalizedDown: [Double] {
+        downloadHistory.map { min($0 / maxVal, 1.0) }
+    }
+
+    private var normalizedUp: [Double] {
+        uploadHistory.map { min($0 / maxVal, 1.0) }
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
 
-            Canvas { context, size in
-                let maxVal = max(
-                    downloadHistory.max() ?? 0,
-                    uploadHistory.max() ?? 0,
-                    1024 // minimum 1 KB/s scale
+            ZStack {
+                // Download fill
+                BandwidthFillShape(
+                    data: AnimatableVector(normalizedDown),
+                    isAbove: true,
+                    isVertical: isVertical
                 )
-                let count = max(downloadHistory.count, uploadHistory.count)
-                guard count > 1 else { return }
+                .fill(downloadColor.opacity(0.3))
 
+                // Download stroke
+                BandwidthStrokeShape(
+                    data: AnimatableVector(normalizedDown),
+                    isAbove: true,
+                    isVertical: isVertical
+                )
+                .stroke(downloadColor, lineWidth: 1.5)
+
+                // Upload fill
+                BandwidthFillShape(
+                    data: AnimatableVector(normalizedUp),
+                    isAbove: false,
+                    isVertical: isVertical
+                )
+                .fill(uploadColor.opacity(0.3))
+
+                // Upload stroke
+                BandwidthStrokeShape(
+                    data: AnimatableVector(normalizedUp),
+                    isAbove: false,
+                    isVertical: isVertical
+                )
+                .stroke(uploadColor, lineWidth: 1.5)
+
+                // Center line
                 if isVertical {
-                    drawVertical(context: context, size: size, maxVal: maxVal, count: count)
+                    Path { path in
+                        path.move(to: CGPoint(x: w / 2, y: 0))
+                        path.addLine(to: CGPoint(x: w / 2, y: h))
+                    }
+                    .stroke(theme.primaryText.opacity(0.15), lineWidth: 0.5)
                 } else {
-                    drawHorizontal(context: context, size: size, maxVal: maxVal, count: count)
+                    Path { path in
+                        path.move(to: CGPoint(x: 0, y: h / 2))
+                        path.addLine(to: CGPoint(x: w, y: h / 2))
+                    }
+                    .stroke(theme.primaryText.opacity(0.15), lineWidth: 0.5)
                 }
             }
-
-            // Center line
-            if isVertical {
-                Path { path in
-                    path.move(to: CGPoint(x: w / 2, y: 0))
-                    path.addLine(to: CGPoint(x: w / 2, y: h))
-                }
-                .stroke(theme.primaryText.opacity(0.15), lineWidth: 0.5)
-            } else {
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: h / 2))
-                    path.addLine(to: CGPoint(x: w, y: h / 2))
-                }
-                .stroke(theme.primaryText.opacity(0.15), lineWidth: 0.5)
-            }
+            .animation(.easeOut(duration: 0.6), value: AnimatableVector(normalizedDown))
+            .animation(.easeOut(duration: 0.6), value: AnimatableVector(normalizedUp))
         }
     }
+}
 
-    // Horizontal: X=time, download above center, upload below center
-    private func drawHorizontal(context: GraphicsContext, size: CGSize, maxVal: Double, count: Int) {
-        let w = size.width
-        let h = size.height
-        let mid = h / 2
+/// Animatable fill shape for a bandwidth half (above or below center).
+private struct BandwidthFillShape: Shape {
+    var data: AnimatableVector
+    let isAbove: Bool
+    let isVertical: Bool
 
-        // Download (above center line)
-        if !downloadHistory.isEmpty {
-            var downFill = Path()
-            downFill.move(to: CGPoint(x: 0, y: mid))
-            for (i, val) in downloadHistory.enumerated() {
-                let x = w * Double(i) / Double(count - 1)
-                let y = mid - (mid * min(val / maxVal, 1.0))
-                downFill.addLine(to: CGPoint(x: x, y: y))
-            }
-            downFill.addLine(to: CGPoint(x: w * Double(downloadHistory.count - 1) / Double(count - 1), y: mid))
-            downFill.closeSubpath()
-            context.fill(downFill, with: .color(downloadColor.opacity(0.3)))
-
-            var downLine = Path()
-            for (i, val) in downloadHistory.enumerated() {
-                let x = w * Double(i) / Double(count - 1)
-                let y = mid - (mid * min(val / maxVal, 1.0))
-                if i == 0 { downLine.move(to: CGPoint(x: x, y: y)) }
-                else { downLine.addLine(to: CGPoint(x: x, y: y)) }
-            }
-            context.stroke(downLine, with: .color(downloadColor), lineWidth: 1.5)
-        }
-
-        // Upload (below center line)
-        if !uploadHistory.isEmpty {
-            var upFill = Path()
-            upFill.move(to: CGPoint(x: 0, y: mid))
-            for (i, val) in uploadHistory.enumerated() {
-                let x = w * Double(i) / Double(count - 1)
-                let y = mid + (mid * min(val / maxVal, 1.0))
-                upFill.addLine(to: CGPoint(x: x, y: y))
-            }
-            upFill.addLine(to: CGPoint(x: w * Double(uploadHistory.count - 1) / Double(count - 1), y: mid))
-            upFill.closeSubpath()
-            context.fill(upFill, with: .color(uploadColor.opacity(0.3)))
-
-            var upLine = Path()
-            for (i, val) in uploadHistory.enumerated() {
-                let x = w * Double(i) / Double(count - 1)
-                let y = mid + (mid * min(val / maxVal, 1.0))
-                if i == 0 { upLine.move(to: CGPoint(x: x, y: y)) }
-                else { upLine.addLine(to: CGPoint(x: x, y: y)) }
-            }
-            context.stroke(upLine, with: .color(uploadColor), lineWidth: 1.5)
-        }
+    var animatableData: AnimatableVector {
+        get { data }
+        set { data = newValue }
     }
 
-    // Vertical: Y=time (top to bottom), download right of center, upload left of center
-    private func drawVertical(context: GraphicsContext, size: CGSize, maxVal: Double, count: Int) {
-        let w = size.width
-        let h = size.height
-        let mid = w / 2
+    func path(in rect: CGRect) -> Path {
+        let values = data.values
+        guard values.count > 1 else { return Path() }
+        let count = values.count
 
-        // Download (right of center)
-        if !downloadHistory.isEmpty {
-            var downFill = Path()
-            downFill.move(to: CGPoint(x: mid, y: 0))
-            for (i, val) in downloadHistory.enumerated() {
-                let y = h * Double(i) / Double(count - 1)
-                let x = mid + (mid * min(val / maxVal, 1.0))
-                downFill.addLine(to: CGPoint(x: x, y: y))
+        if isVertical {
+            let mid = rect.width / 2
+            let points = values.enumerated().map { i, val in
+                let y = rect.height * Double(i) / Double(count - 1)
+                let x = isAbove
+                    ? mid + (mid * min(max(val, 0), 1.0))
+                    : mid - (mid * min(max(val, 0), 1.0))
+                return CGPoint(x: x, y: y)
             }
-            downFill.addLine(to: CGPoint(x: mid, y: h * Double(downloadHistory.count - 1) / Double(count - 1)))
-            downFill.closeSubpath()
-            context.fill(downFill, with: .color(downloadColor.opacity(0.3)))
-
-            var downLine = Path()
-            for (i, val) in downloadHistory.enumerated() {
-                let y = h * Double(i) / Double(count - 1)
-                let x = mid + (mid * min(val / maxVal, 1.0))
-                if i == 0 { downLine.move(to: CGPoint(x: x, y: y)) }
-                else { downLine.addLine(to: CGPoint(x: x, y: y)) }
+            var path = Path()
+            path.move(to: CGPoint(x: mid, y: 0))
+            // Trace along the curve points
+            appendCatmullRomCurve(to: &path, points: points, from: points[0])
+            // Close back along the center line
+            path.addLine(to: CGPoint(x: mid, y: rect.height))
+            path.closeSubpath()
+            return path
+        } else {
+            let mid = rect.height / 2
+            let points = values.enumerated().map { i, val in
+                let x = rect.width * Double(i) / Double(count - 1)
+                let y = isAbove
+                    ? mid - (mid * min(max(val, 0), 1.0))
+                    : mid + (mid * min(max(val, 0), 1.0))
+                return CGPoint(x: x, y: y)
             }
-            context.stroke(downLine, with: .color(downloadColor), lineWidth: 1.5)
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: mid))
+            // Trace along the curve points
+            appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: 0, y: mid))
+            // Close back along the center line
+            path.addLine(to: CGPoint(x: rect.width, y: mid))
+            path.closeSubpath()
+            return path
         }
+    }
+}
 
-        // Upload (left of center)
-        if !uploadHistory.isEmpty {
-            var upFill = Path()
-            upFill.move(to: CGPoint(x: mid, y: 0))
-            for (i, val) in uploadHistory.enumerated() {
-                let y = h * Double(i) / Double(count - 1)
-                let x = mid - (mid * min(val / maxVal, 1.0))
-                upFill.addLine(to: CGPoint(x: x, y: y))
-            }
-            upFill.addLine(to: CGPoint(x: mid, y: h * Double(uploadHistory.count - 1) / Double(count - 1)))
-            upFill.closeSubpath()
-            context.fill(upFill, with: .color(uploadColor.opacity(0.3)))
+/// Animatable stroke shape for a bandwidth half (above or below center).
+private struct BandwidthStrokeShape: Shape {
+    var data: AnimatableVector
+    let isAbove: Bool
+    let isVertical: Bool
 
-            var upLine = Path()
-            for (i, val) in uploadHistory.enumerated() {
-                let y = h * Double(i) / Double(count - 1)
-                let x = mid - (mid * min(val / maxVal, 1.0))
-                if i == 0 { upLine.move(to: CGPoint(x: x, y: y)) }
-                else { upLine.addLine(to: CGPoint(x: x, y: y)) }
+    var animatableData: AnimatableVector {
+        get { data }
+        set { data = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let values = data.values
+        guard values.count > 1 else { return Path() }
+        let count = values.count
+
+        if isVertical {
+            let mid = rect.width / 2
+            let points = values.enumerated().map { i, val in
+                let y = rect.height * Double(i) / Double(count - 1)
+                let x = isAbove
+                    ? mid + (mid * min(max(val, 0), 1.0))
+                    : mid - (mid * min(max(val, 0), 1.0))
+                return CGPoint(x: x, y: y)
             }
-            context.stroke(upLine, with: .color(uploadColor), lineWidth: 1.5)
+            return catmullRomPath(points: points)
+        } else {
+            let mid = rect.height / 2
+            let points = values.enumerated().map { i, val in
+                let x = rect.width * Double(i) / Double(count - 1)
+                let y = isAbove
+                    ? mid - (mid * min(max(val, 0), 1.0))
+                    : mid + (mid * min(max(val, 0), 1.0))
+                return CGPoint(x: x, y: y)
+            }
+            return catmullRomPath(points: points)
         }
     }
 }
@@ -695,22 +717,9 @@ private struct SparklineView: View {
     let color: Color
 
     var body: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let height = geometry.size.height
-
-            if data.count > 1 {
-                // Fill (rendered first, behind the line)
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: height))
-                    for (index, value) in data.enumerated() {
-                        let x = width * Double(index) / Double(data.count - 1)
-                        let y = height * (1 - min(value, 1.0))
-                        path.addLine(to: CGPoint(x: x, y: y))
-                    }
-                    path.addLine(to: CGPoint(x: width, y: height))
-                    path.closeSubpath()
-                }
+        ZStack {
+            // Fill (rendered first, behind the line)
+            SparklineFillShape(data: AnimatableVector(data))
                 .fill(
                     LinearGradient(
                         colors: [color.opacity(0.35), color.opacity(0.05)],
@@ -719,21 +728,173 @@ private struct SparklineView: View {
                     )
                 )
 
-                // Line (on top)
-                Path { path in
-                    for (index, value) in data.enumerated() {
-                        let x = width * Double(index) / Double(data.count - 1)
-                        let y = height * (1 - min(value, 1.0))
-                        if index == 0 {
-                            path.move(to: CGPoint(x: x, y: y))
-                        } else {
-                            path.addLine(to: CGPoint(x: x, y: y))
-                        }
-                    }
-                }
+            // Line (on top)
+            SparklineStrokeShape(data: AnimatableVector(data))
                 .stroke(color.opacity(0.9), lineWidth: 2)
-            }
         }
+        .animation(.easeOut(duration: 0.6), value: AnimatableVector(data))
+    }
+}
+
+/// Animatable shape for the sparkline fill area.
+private struct SparklineFillShape: Shape {
+    var data: AnimatableVector
+
+    var animatableData: AnimatableVector {
+        get { data }
+        set { data = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let values = data.values
+        guard values.count > 1 else { return Path() }
+
+        let points = values.enumerated().map { index, value in
+            CGPoint(
+                x: rect.width * Double(index) / Double(values.count - 1),
+                y: rect.height * (1 - min(max(value, 0), 1.0))
+            )
+        }
+
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: rect.height))
+        // Line up to the first data point, then trace the curve
+        appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: 0, y: rect.height))
+        // Close back to bottom-right
+        path.addLine(to: CGPoint(x: rect.width, y: rect.height))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Animatable shape for the sparkline stroke.
+private struct SparklineStrokeShape: Shape {
+    var data: AnimatableVector
+
+    var animatableData: AnimatableVector {
+        get { data }
+        set { data = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let values = data.values
+        guard values.count > 1 else { return Path() }
+
+        let points = values.enumerated().map { index, value in
+            CGPoint(
+                x: rect.width * Double(index) / Double(values.count - 1),
+                y: rect.height * (1 - min(max(value, 0), 1.0))
+            )
+        }
+
+        return catmullRomPath(points: points)
+    }
+}
+
+// MARK: - Animatable Vector
+//
+// VectorArithmetic-conforming wrapper around [Double] so SwiftUI can
+// interpolate between two arrays of doubles during animation.
+
+private struct AnimatableVector: VectorArithmetic, Equatable {
+    var values: [Double]
+
+    init(_ values: [Double]) { self.values = values }
+
+    static var zero: AnimatableVector { AnimatableVector([]) }
+
+    /// Extend a shorter array to match the target count by repeating the last value.
+    /// This prevents the "rise from 0" artifact when the history array grows.
+    private static func aligned(_ arr: [Double], count: Int) -> [Double] {
+        if arr.count >= count { return arr }
+        if arr.isEmpty { return [Double](repeating: 0, count: count) }
+        let pad = arr.last!
+        return arr + [Double](repeating: pad, count: count - arr.count)
+    }
+
+    static func + (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        let l = aligned(lhs.values, count: count)
+        let r = aligned(rhs.values, count: count)
+        return AnimatableVector(zip(l, r).map { $0 + $1 })
+    }
+
+    static func - (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        let l = aligned(lhs.values, count: count)
+        let r = aligned(rhs.values, count: count)
+        return AnimatableVector(zip(l, r).map { $0 - $1 })
+    }
+
+    mutating func scale(by rhs: Double) {
+        for i in values.indices { values[i] *= rhs }
+    }
+
+    var magnitudeSquared: Double {
+        values.reduce(0) { $0 + $1 * $1 }
+    }
+}
+
+// MARK: - Catmull-Rom Spline Helpers
+//
+// Converts an array of CGPoints into a smooth Path using centripetal
+// Catmull-Rom → cubic Bezier conversion. Each segment between consecutive
+// points gets smooth control points derived from their neighbors.
+//
+// Uses monotone clamping to prevent overshoot — control points are clamped
+// so curves never exceed the Y range of their endpoints (no crossing the
+// center line in bandwidth graphs, no going below 0 or above 1 in sparklines).
+
+/// Build a standalone path starting at points[0] (for strokes).
+private func catmullRomPath(points: [CGPoint]) -> Path {
+    Path { path in
+        guard points.count > 1 else { return }
+        path.move(to: points[0])
+        addCatmullRomSegments(to: &path, points: points)
+    }
+}
+
+/// Append curve segments to an existing path (for fills).
+/// Draws a line from `from` to points[0], then adds curve segments.
+private func appendCatmullRomCurve(to path: inout Path, points: [CGPoint], from: CGPoint) {
+    guard points.count > 1 else { return }
+    path.addLine(to: points[0])
+    addCatmullRomSegments(to: &path, points: points)
+}
+
+/// Core: add Catmull-Rom cubic Bezier segments to a path (path cursor must already be at points[0]).
+private func addCatmullRomSegments(to path: inout Path, points: [CGPoint]) {
+    if points.count == 2 {
+        path.addLine(to: points[1])
+        return
+    }
+
+    for i in 0..<(points.count - 1) {
+        let p0 = points[max(i - 1, 0)]
+        let p1 = points[i]
+        let p2 = points[i + 1]
+        let p3 = points[min(i + 2, points.count - 1)]
+
+        // Tension factor — 6.0 gives gentle smoothing without excess overshoot
+        let tension: CGFloat = 6.0
+        var cp1 = CGPoint(
+            x: p1.x + (p2.x - p0.x) / tension,
+            y: p1.y + (p2.y - p0.y) / tension
+        )
+        var cp2 = CGPoint(
+            x: p2.x - (p3.x - p1.x) / tension,
+            y: p2.y - (p3.y - p1.y) / tension
+        )
+
+        // Monotone Y clamping — prevent control points from overshooting
+        // the Y range of the segment endpoints. This stops curves from
+        // crossing the center line or going negative.
+        let minY = min(p1.y, p2.y)
+        let maxY = max(p1.y, p2.y)
+        cp1.y = min(max(cp1.y, minY), maxY)
+        cp2.y = min(max(cp2.y, minY), maxY)
+
+        path.addCurve(to: p2, control1: cp1, control2: cp2)
     }
 }
 
