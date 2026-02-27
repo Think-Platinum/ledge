@@ -45,12 +45,10 @@ class HomeAssistantClient {
         var result = FetchResult()
 
         guard isConfigured else {
-            logger.info("Client not configured (serverURL='\(self.serverURL)', hasToken=\(!self.accessToken.isEmpty)) — skipping fetch")
             return result
         }
 
         let base = normalisedURL
-        logger.info("Fetching \(entityIDs.count) entities from \(base)")
 
         for entityID in entityIDs {
             let urlString = "\(base)/api/states/\(entityID)"
@@ -64,7 +62,6 @@ class HomeAssistantClient {
             request.timeoutInterval = 10
 
             do {
-                logger.debug("GET \(urlString)")
                 let (data, response) = try await URLSession.shared.data(for: request)
 
                 if let httpResponse = response as? HTTPURLResponse {
@@ -97,8 +94,6 @@ class HomeAssistantClient {
                 let brightness = attrs["brightness"] as? Int
                 let unit = attrs["unit_of_measurement"] as? String
 
-                logger.info("Entity \(entityID): state=\(state), name=\(friendlyName)")
-
                 result.entities.append(EntityState(
                     id: entityID,
                     state: state,
@@ -124,7 +119,9 @@ class HomeAssistantClient {
             }
         }
 
-        logger.info("Fetched \(result.entities.count)/\(entityIDs.count) entities, \(result.errors.count) errors")
+        if !result.errors.isEmpty {
+            logger.warning("Fetched \(result.entities.count)/\(entityIDs.count) entities, \(result.errors.count) errors")
+        }
         return result
     }
 

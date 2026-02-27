@@ -112,20 +112,11 @@ struct GridRenderer: View {
         } else {
             switch themeManager.dashboardBackgroundMode {
             case .themeColor:
-                if bgStyle == .solid {
-                    theme.dashboardBackground
-                } else if let wallpaper = themeManager.desktopWallpaper {
-                    // In fullscreen mode the desktop is hidden. When using blur/transparent
-                    // backgrounds, show the macOS wallpaper so widgets have something to blur
-                    // against (otherwise it's just black).
-                    Image(nsImage: wallpaper)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: size.width, height: size.height)
-                        .clipped()
-                } else {
-                    Color.clear
-                }
+                // Always show the theme's solid dashboard background colour.
+                // The widget background style (solid/blur/transparent) is a separate
+                // concern for how individual widgets render — it should NOT override
+                // the user's explicit "Theme Color" dashboard background choice.
+                theme.dashboardBackground
 
             case .image:
                 if let nsImage = themeManager.backgroundImage {

@@ -5,13 +5,29 @@ import os
 /// Extracts dominant colors from album artwork for dynamic widget backgrounds.
 ///
 /// Downloads the image, scales it down for fast processing, then samples
-/// pixels to find dominant and accent colors. Results are cached by URL.
+/// pixels to find dominant and accent colors. Also samples the image edges
+/// for directional colour bleed. Results are cached by URL.
 nonisolated class AlbumColorExtractor: @unchecked Sendable {
 
     struct Colors: Equatable {
+        /// Dominant colour, darkened for centre glow (text-safe).
         let primary: Color
+        /// Secondary accent colour, darkened.
         let secondary: Color
+        /// Whether the raw primary colour is dark (brightness < 0.5).
         let isDark: Bool
+
+        // Edge-sampled colours at near-full saturation for radial bleed.
+        // Each is the average colour of one edge of the album art, lightly
+        // darkened (80%) to avoid pure-white bleed.
+        let edgeTop: Color
+        let edgeBottom: Color
+        let edgeLeading: Color
+        let edgeTrailing: Color
+
+        /// Average luminance of the raw (undarkened) primary colour (0–1).
+        /// Used by the widget to decide adaptive text colour for contrast.
+        let primaryLuminance: Double
     }
 
     /// Thread-safe cache of extracted colors keyed by artwork URL.
@@ -57,7 +73,7 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return Colors(primary: Color(white: 0.15), secondary: Color(white: 0.1), isDark: true)
+            return .fallback
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
@@ -105,7 +121,7 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
         let sg = secondaryBucket.g / Double(secondaryBucket.count)
         let sb = secondaryBucket.b / Double(secondaryBucket.count)
 
-        // Darken the colors to ensure text readability (multiply by 0.4)
+        // Darken the colors for the centre glow (multiply by 0.4)
         let darkenFactor = 0.4
         let primary = Color(
             red: pr * darkenFactor,
@@ -118,7 +134,69 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
             blue: sb * darkenFactor * 0.7
         )
 
+        // Sample the 4 edges of the image for directional bleed colours
+        let edgeTop = averageEdge(pixelData: pixelData, sampleSize: sampleSize, edge: .top)
+        let edgeBottom = averageEdge(pixelData: pixelData, sampleSize: sampleSize, edge: .bottom)
+        let edgeLeading = averageEdge(pixelData: pixelData, sampleSize: sampleSize, edge: .leading)
+        let edgeTrailing = averageEdge(pixelData: pixelData, sampleSize: sampleSize, edge: .trailing)
+
         let brightness = (pr + pg + pb) / 3.0
-        return Colors(primary: primary, secondary: secondary, isDark: brightness < 0.5)
+        return Colors(
+            primary: primary,
+            secondary: secondary,
+            isDark: brightness < 0.5,
+            edgeTop: edgeTop,
+            edgeBottom: edgeBottom,
+            edgeLeading: edgeLeading,
+            edgeTrailing: edgeTrailing,
+            primaryLuminance: brightness
+        )
     }
+
+    // MARK: - Edge Sampling
+
+    private enum Edge { case top, bottom, leading, trailing }
+
+    /// Averages the pixel colours along one edge of the sample grid.
+    /// Lightly darkened (80%) to avoid pure-white bleed at widget edges.
+    private func averageEdge(pixelData: [UInt8], sampleSize: Int, edge: Edge) -> Color {
+        var totalR = 0.0, totalG = 0.0, totalB = 0.0
+        let count = sampleSize
+
+        for i in 0..<sampleSize {
+            let offset: Int
+            switch edge {
+            case .top:      offset = i * 4                                          // y=0, x=i
+            case .bottom:   offset = ((sampleSize - 1) * sampleSize + i) * 4       // y=last, x=i
+            case .leading:  offset = (i * sampleSize) * 4                           // y=i, x=0
+            case .trailing: offset = (i * sampleSize + sampleSize - 1) * 4         // y=i, x=last
+            }
+            totalR += Double(pixelData[offset]) / 255.0
+            totalG += Double(pixelData[offset + 1]) / 255.0
+            totalB += Double(pixelData[offset + 2]) / 255.0
+        }
+
+        let n = Double(count)
+        // Use the true average edge colour — no darkening — so the bleed
+        // matches the actual pixel colours at the album art boundary.
+        return Color(
+            red: totalR / n,
+            green: totalG / n,
+            blue: totalB / n
+        )
+    }
+}
+
+extension AlbumColorExtractor.Colors {
+    /// Fallback colours when image analysis fails.
+    static let fallback = AlbumColorExtractor.Colors(
+        primary: Color(white: 0.15),
+        secondary: Color(white: 0.1),
+        isDark: true,
+        edgeTop: Color(white: 0.2),
+        edgeBottom: Color(white: 0.2),
+        edgeLeading: Color(white: 0.2),
+        edgeTrailing: Color(white: 0.2),
+        primaryLuminance: 0.15
+    )
 }

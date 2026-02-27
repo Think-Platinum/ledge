@@ -52,14 +52,19 @@ final class TouchWatchdog {
     /// continuous stream of events — silence during an active sequence is suspicious.
     private(set) var isTouchSequenceActive: Bool = false
 
+    /// Whether the HID touch reader is the primary pipeline (vs CGEventTap).
+    /// Affects status messages only.
+    var isHIDReaderActive: Bool = false
+
     /// Current health status message (for diagnostic display).
     var healthStatus: String {
+        let pipeline = isHIDReaderActive ? "HID" : "Tap"
         if !isTapHealthy {
             return "⚠️ TAP DISABLED"
         } else if isDeadTapDetected {
-            return "⚠️ TAP STALLED (events stopped mid-touch)"
+            return "⚠️ \(pipeline) STALLED (events stopped mid-touch)"
         } else {
-            return "✓ Healthy"
+            return "✓ Healthy (\(pipeline))"
         }
     }
 
@@ -80,8 +85,15 @@ final class TouchWatchdog {
     /// Callback to get the total event count from the flight recorder.
     var getTotalEventCount: (() -> UInt64)?
 
+    /// Callback to recreate the CGEventTap when re-enable fails.
+    /// The callback should tear down and recreate the tap, then return the new tap.
+    var onTapRecreatNeeded: (() -> CFMachPort?)?
+
     /// Last known total event count (for detecting new activity).
     private var lastKnownEventCount: UInt64 = 0
+
+    /// Number of consecutive re-enable failures (triggers tap recreation).
+    private var consecutiveReenableFailures: Int = 0
 
     // MARK: - Lifecycle
 
@@ -94,6 +106,7 @@ final class TouchWatchdog {
         lastDisableTime = nil
         checksPerformed = 0
         consecutiveQuietChecks = 0
+        consecutiveReenableFailures = 0
         isTapHealthy = true
         isDeadTapDetected = false
         lastKnownEventCount = getTotalEventCount?() ?? 0
@@ -113,6 +126,7 @@ final class TouchWatchdog {
         tap = nil
         consecutiveQuietChecks = 0
         isDeadTapDetected = false
+        isTouchSequenceActive = false
         logger.info("Watchdog stopped")
     }
 
@@ -160,12 +174,28 @@ final class TouchWatchdog {
             let nowEnabled = CGEvent.tapIsEnabled(tap: tap)
             if nowEnabled {
                 isTapHealthy = true
+                consecutiveReenableFailures = 0
                 logger.info("Watchdog: tap successfully re-enabled")
             } else {
-                logger.error("Watchdog: tap re-enable FAILED — touch will not work until restart")
+                consecutiveReenableFailures += 1
+                logger.error("Watchdog: tap re-enable FAILED (attempt #\(self.consecutiveReenableFailures))")
+
+                // After 2 consecutive failures, try recreating the entire tap
+                if consecutiveReenableFailures >= 2, let recreate = onTapRecreatNeeded {
+                    logger.notice("Watchdog: attempting full tap recreation...")
+                    if let newTap = recreate() {
+                        self.tap = newTap
+                        isTapHealthy = CGEvent.tapIsEnabled(tap: newTap)
+                        consecutiveReenableFailures = 0
+                        logger.notice("Watchdog: tap recreated — healthy=\(self.isTapHealthy)")
+                    } else {
+                        logger.error("Watchdog: tap recreation FAILED — touch suppression will not work")
+                    }
+                }
             }
             return
         }
+        consecutiveReenableFailures = 0
 
         // Tap is enabled — mark as healthy (at least not disabled)
         if !isTapHealthy {
@@ -190,12 +220,14 @@ final class TouchWatchdog {
             // No new events since last check
             consecutiveQuietChecks += 1
 
-            // Only flag as dead if we've seen a significant quiet period
-            // AND we've seen events before (if we never received any, maybe user just hasn't touched)
-            if consecutiveQuietChecks >= 4 && currentEventCount > 0 {
+            // Only flag as dead if a touch sequence is active (finger is down)
+            // AND events have stopped arriving. Idle periods between touches are
+            // completely normal — the display can sit untouched for hours.
+            if isTouchSequenceActive && consecutiveQuietChecks >= 3 {
                 if !isDeadTapDetected {
                     isDeadTapDetected = true
-                    logger.error("⚠ Watchdog: DEAD TAP detected — tap is enabled but no events received for \(self.consecutiveQuietChecks * Int(self.checkInterval))s")
+                    let quietSeconds = consecutiveQuietChecks * Int(checkInterval)
+                    logger.error("⚠ Watchdog: TAP STALLED — touch sequence active but no events for \(quietSeconds)s")
                     logger.error("   This may indicate: (1) CGEventTap thread crashed, (2) macOS is filtering events, (3) HID device disconnected")
                     logger.error("   Recommendation: Toggle panel OFF and back ON, or restart Ledge")
                 }

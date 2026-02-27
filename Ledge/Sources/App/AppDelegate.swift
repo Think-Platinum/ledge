@@ -255,6 +255,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.regular)
         } else {
             NSApp.setActivationPolicy(.accessory)
+
+            // The activation policy switch from .regular → .accessory can
+            // destabilize the fullscreen helper's Space on the Edge display,
+            // causing the panel to drop out of fullscreen and the menu bar to
+            // reappear. Re-assert the fullscreen state after a short delay to
+            // let the policy change propagate through the window server.
+            if displayManager.isActive, let screen = displayManager.xeneonScreen {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.displayManager.reassertFullscreen(on: screen)
+                }
+            }
         }
     }
 

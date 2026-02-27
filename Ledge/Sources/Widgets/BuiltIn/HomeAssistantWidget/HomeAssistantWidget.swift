@@ -251,10 +251,10 @@ struct HomeAssistantWidgetView: View {
             client.serverURL = config.serverURL
             client.accessToken = config.accessToken
             isConfigured = client.isConfigured
-            logger.info("Loaded config: serverURL='\(config.serverURL)', entities=\(config.entityIDs), isConfigured=\(isConfigured)")
+            logger.debug("Loaded config: serverURL='\(config.serverURL)', entities=\(config.entityIDs), isConfigured=\(isConfigured)")
         } else {
             isConfigured = false
-            logger.info("No saved config for instance \(instanceID.uuidString)")
+            logger.debug("No saved config for instance \(instanceID.uuidString)")
         }
     }
 }

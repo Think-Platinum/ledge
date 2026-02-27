@@ -57,6 +57,20 @@ class DisplayManager: ObservableObject {
     /// Watchdog timer that monitors CGEventTap health independently of the callback.
     let touchWatchdog = TouchWatchdog()
 
+    /// IOKit HID direct touch reader — reads raw digitizer reports for reliable
+    /// touch input, bypassing macOS's broken coordinate mapping.
+    let hidTouchReader = HIDTouchReader()
+
+    /// Whether the HID touch reader is active and handling touch delivery.
+    @Published private(set) var isHIDTouchReaderActive: Bool = false
+
+    /// Which touch pipeline is currently active.
+    enum TouchPipelineMode: String {
+        case cgEventTapOnly = "CGEventTap (legacy)"
+        case hidWithSuppression = "HID + CGEventTap suppression"
+    }
+    @Published private(set) var touchPipelineMode: TouchPipelineMode = .cgEventTapOnly
+
     /// Mouse guard that blocks non-touchscreen mouse events on the Edge display.
     let mouseGuard = MouseGuard()
 
@@ -245,6 +259,7 @@ class DisplayManager: ObservableObject {
         if panel == nil {
             panel = LedgePanel(on: screen)
             touchRemapper.panel = panel
+            hidTouchReader.panel = panel
 
             // Wire delivery confirmation for latency tracking.
             // When the panel receives a touch event via sendEvent(), record the
@@ -295,6 +310,31 @@ class DisplayManager: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 NSApp.deactivate()
             }
+        }
+    }
+
+    /// Re-assert the fullscreen helper and panel positioning after an event
+    /// that may have destabilized the fullscreen Space (e.g., activation policy
+    /// switch from `.regular` to `.accessory` when the settings window closes).
+    func reassertFullscreen(on screen: NSScreen) {
+        if let helper = fullscreenHelper, !helper.styleMask.contains(.fullScreen) {
+            // Helper lost fullscreen state — rebuild it
+            logger.info("Fullscreen helper lost fullscreen state — rebuilding")
+            tearDownFullscreenHelper()
+            ensureFullscreenHelper(on: screen) { [weak self] in
+                self?.revealPanel(on: screen)
+            }
+        } else if fullscreenHelper == nil && isActive {
+            // Helper was destroyed — recreate it
+            logger.info("Fullscreen helper missing — recreating")
+            ensureFullscreenHelper(on: screen) { [weak self] in
+                self?.revealPanel(on: screen)
+            }
+        } else {
+            // Helper is fine — just re-assert panel position and window level
+            panel?.level = .screenSaver
+            panel?.setFrame(screen.frame, display: true, animate: false)
+            panel?.orderFrontRegardless()
         }
     }
 
@@ -356,7 +396,24 @@ class DisplayManager: ObservableObject {
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
                 panel?.reposition(on: currentScreen)
                 touchRemapper.updateTargetScreen(currentScreen)
+                hidTouchReader.updatePanelFrame(currentScreen.frame)
                 mouseGuard.updateEdgeScreen(currentScreen)
+
+                // The fullscreen helper's Space was created for the old screen frame.
+                // Tear it down and recreate for the new screen position so the
+                // fullscreen Space and menu bar hiding follow the display move.
+                if fullscreenHelper != nil {
+                    logger.info("Rebuilding fullscreen helper for new screen frame")
+                    tearDownFullscreenHelper()
+                    // Brief delay to let the async fullscreen exit animation begin
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard let self, let screen = self.xeneonScreen else { return }
+                        self.ensureFullscreenHelper(on: screen) { [weak self] in
+                            guard let self, let screen = self.xeneonScreen else { return }
+                            self.revealPanel(on: screen)
+                        }
+                    }
+                }
             }
         } else if previousScreen != nil {
             // Xeneon Edge was disconnected
@@ -440,6 +497,12 @@ class DisplayManager: ObservableObject {
 
     /// Stop the touch remapper and reset all touch state.
     func stopTouchRemapper() {
+        // Stop HID reader first, then CGEventTap
+        hidTouchReader.stop()
+        isHIDTouchReaderActive = false
+        touchPipelineMode = .cgEventTapOnly
+        touchRemapper.suppressionOnly = false
+
         touchRemapper.stop()
         touchWatchdog.stop()
         mouseGuard.stop()
@@ -582,6 +645,15 @@ class DisplayManager: ObservableObject {
             // Notify watchdog of event activity (heartbeat for dead tap detection)
             Task { @MainActor in
                 self?.touchWatchdog.recordEventActivity()
+
+                // Track touch sequence lifecycle so the watchdog only flags
+                // stalls during active sequences, not idle periods.
+                let eventKind = TouchFlightRecorder.EventKind(cgEventType: eventTypeRaw)
+                if eventKind == .down {
+                    self?.touchWatchdog.touchSequenceStarted()
+                } else if eventKind == .up {
+                    self?.touchWatchdog.touchSequenceEnded()
+                }
             }
 
             // Update UI state on MainActor
@@ -609,12 +681,24 @@ class DisplayManager: ObservableObject {
             touchWatchdog.getTotalEventCount = { [weak self] in
                 self?.flightRecorder.totalRecorded ?? 0
             }
+
+            // Wire tap recreation for when re-enable fails repeatedly
+            touchWatchdog.onTapRecreatNeeded = { [weak self] in
+                guard let self else { return nil }
+                self.touchRemapper.recreateTap()
+                return self.touchRemapper.eventTap
+            }
         }
 
         // Start the mouse guard if enabled and device IDs are known
         updateMouseGuardState()
 
+        // Attempt to start the HID touch reader for direct digitizer access.
+        // If it succeeds, TouchRemapper switches to suppression-only mode.
+        // If it fails, CGEventTap continues handling everything (fallback).
         if touchRemapper.isActive {
+            startHIDTouchReader(screen: screen)
+
             if calibrationState == .autoDetected {
                 logger.info("Event tap active — touchscreen auto-detected, ready for input")
             } else {
@@ -623,6 +707,91 @@ class DisplayManager: ObservableObject {
         } else {
             logger.error("Event tap failed to start")
         }
+    }
+
+    // MARK: - HID Touch Reader Management
+
+    /// Attempt to start the IOKit HID direct touch reader.
+    ///
+    /// When successful, `TouchRemapper` switches to suppression-only mode:
+    /// it still intercepts and drops the wrongly-mapped mouse events, but
+    /// `HIDTouchReader` handles actual touch delivery from raw reports.
+    private func startHIDTouchReader(screen: NSScreen) {
+        hidTouchReader.panel = panel
+        // Set debug count BEFORE start() so it's visible in the startup log
+        hidTouchReader.debugReportLogCount = 10
+        hidTouchReader.start(panelFrame: screen.frame)
+
+        guard hidTouchReader.isActive else {
+            // HID reader failed — fall back to CGEventTap remapping
+            touchRemapper.suppressionOnly = false
+            isHIDTouchReaderActive = false
+            touchPipelineMode = .cgEventTapOnly
+            logger.warning("HID Touch Reader failed to start — falling back to CGEventTap remapping")
+            return
+        }
+
+        // HID reader is active — switch TouchRemapper to suppression-only
+        touchRemapper.suppressionOnly = true
+        isHIDTouchReaderActive = true
+        touchPipelineMode = .hidWithSuppression
+        touchWatchdog.isHIDReaderActive = true
+
+        // Wire diagnostics to flight recorder and watchdog
+        hidTouchReader.onTouchEvent = { [weak self] contact, eventType, seqID, arrivalTime in
+            guard let self else { return }
+
+            let flightEventKind: TouchFlightRecorder.EventKind
+            switch eventType {
+            case .down:  flightEventKind = .down
+            case .moved: flightEventKind = .drag
+            case .up:    flightEventKind = .up
+            }
+
+            let entry = TouchFlightRecorder.Entry(
+                timestamp: arrivalTime,
+                sequenceID: seqID,
+                deviceID: 0,  // HID reader doesn't use CGEvent device IDs
+                originalPoint: CGPoint(x: CGFloat(contact.rawX), y: CGFloat(contact.rawY)),
+                remappedPoint: CGPoint(x: contact.displayX, y: contact.displayY),
+                eventType: flightEventKind,
+                deliveryStatus: .delivered,
+                deliveryLatencyMs: nil
+            )
+            self.flightRecorder.append(entry)
+
+            Task { @MainActor in
+                self.touchWatchdog.recordEventActivity()
+                if eventType == .down {
+                    self.touchWatchdog.touchSequenceStarted()
+                } else if eventType == .up {
+                    self.touchWatchdog.touchSequenceEnded()
+                }
+            }
+
+            Task { @MainActor in
+                self.lastTouchInfo = TouchEventInfo(
+                    deviceID: 0,
+                    originalPoint: CGPoint(x: CGFloat(contact.rawX), y: CGFloat(contact.rawY)),
+                    remappedPoint: CGPoint(x: contact.displayX, y: contact.displayY),
+                    timestamp: arrivalTime
+                )
+            }
+        }
+
+        // Handle device disconnection — revert to CGEventTap
+        hidTouchReader.onDeviceDisconnected = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.logger.warning("HID touchscreen disconnected — reverting to CGEventTap remapping")
+                self.touchRemapper.suppressionOnly = false
+                self.isHIDTouchReaderActive = false
+                self.touchPipelineMode = .cgEventTapOnly
+                self.touchWatchdog.isHIDReaderActive = false
+            }
+        }
+
+        logger.info("HID Touch Reader active — TouchRemapper in suppression-only mode")
     }
 
     /// Start polling for Accessibility permission grant (timer + app activation observer).

@@ -18,6 +18,10 @@ struct SystemPerformanceWidget {
     final class SharedHistory {
         static let shared = SharedHistory()
 
+        /// Number of visible points on the chart. Arrays keep up to maxHistory + 1
+        /// points — the extra point is the "incoming" sample that scrolls into view.
+        static let maxHistory = 60
+
         var metrics = SystemPerformanceProvider.Metrics()
         var cpuHistory: [Double] = []
         var memHistory: [Double] = []
@@ -26,28 +30,26 @@ struct SystemPerformanceWidget {
         var downloadHistory: [Double] = []
         var uploadHistory: [Double] = []
 
-        let maxHistory = 60
-
         func append(_ m: SystemPerformanceProvider.Metrics) {
             metrics = m
 
             cpuHistory.append(m.cpuUsage / 100.0)
-            if cpuHistory.count > maxHistory { cpuHistory.removeFirst() }
+            if cpuHistory.count > Self.maxHistory + 1 { cpuHistory.removeFirst() }
 
             memHistory.append(m.memoryPercent / 100.0)
-            if memHistory.count > maxHistory { memHistory.removeFirst() }
+            if memHistory.count > Self.maxHistory + 1 { memHistory.removeFirst() }
 
             diskReadHistory.append(m.diskReadBytesPerSec)
-            if diskReadHistory.count > maxHistory { diskReadHistory.removeFirst() }
+            if diskReadHistory.count > Self.maxHistory + 1 { diskReadHistory.removeFirst() }
 
             diskWriteHistory.append(m.diskWriteBytesPerSec)
-            if diskWriteHistory.count > maxHistory { diskWriteHistory.removeFirst() }
+            if diskWriteHistory.count > Self.maxHistory + 1 { diskWriteHistory.removeFirst() }
 
             downloadHistory.append(m.networkDownBytesPerSec)
-            if downloadHistory.count > maxHistory { downloadHistory.removeFirst() }
+            if downloadHistory.count > Self.maxHistory + 1 { downloadHistory.removeFirst() }
 
             uploadHistory.append(m.networkUpBytesPerSec)
-            if uploadHistory.count > maxHistory { uploadHistory.removeFirst() }
+            if uploadHistory.count > Self.maxHistory + 1 { uploadHistory.removeFirst() }
         }
     }
 
@@ -88,6 +90,11 @@ struct SystemPerformanceWidgetView: View {
     @State private var downloadHistory: [Double] = []
     @State private var uploadHistory: [Double] = []
 
+    /// Scroll phase drives horizontal translation of chart points (0 = no scroll,
+    /// 1 = scrolled one step left). Animated with `.linear` to create smooth
+    /// continuous scrolling instead of per-point Y interpolation.
+    @State private var scrollPhase: CGFloat = 0
+
     private let pollTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -124,7 +131,8 @@ struct SystemPerformanceWidgetView: View {
                     history: cpuHistory,
                     color: cpuColor,
                     sparklineColor: .mint,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
 
@@ -137,7 +145,8 @@ struct SystemPerformanceWidgetView: View {
                     history: memHistory,
                     color: memColor,
                     sparklineColor: .cyan,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
 
@@ -151,7 +160,8 @@ struct SystemPerformanceWidgetView: View {
                     diskTotal: metrics.diskTotal,
                     diskPercent: metrics.diskPercent / 100.0,
                     color: diskColor,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
 
@@ -161,7 +171,8 @@ struct SystemPerformanceWidgetView: View {
                     uploadHistory: uploadHistory,
                     currentDown: metrics.networkDownBytesPerSec,
                     currentUp: metrics.networkUpBytesPerSec,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
         }
@@ -250,25 +261,50 @@ struct SystemPerformanceWidgetView: View {
         diskWriteHistory = history.diskWriteHistory
         downloadHistory = history.downloadHistory
         uploadHistory = history.uploadHistory
+
+        // If the history is already full, set phase to 1 so we show the latest
+        // window of data (the oldest extra point is already "scrolled off").
+        if cpuHistory.count > SystemPerformanceWidget.SharedHistory.maxHistory {
+            scrollPhase = 1.0
+        }
     }
 
     private func refreshMetrics() {
         let p = provider
+        let h = history
         Task.detached {
             let m = p.collect()
             await MainActor.run {
                 metrics = m
 
                 // Update shared history (survives page changes)
-                history.append(m)
+                h.append(m)
 
-                // Sync local @State arrays for rendering
-                cpuHistory = history.cpuHistory
-                memHistory = history.memHistory
-                diskReadHistory = history.diskReadHistory
-                diskWriteHistory = history.diskWriteHistory
-                downloadHistory = history.downloadHistory
-                uploadHistory = history.uploadHistory
+                // Atomically update data arrays and reset scroll phase (no animation).
+                // At phase=0 with the new (shifted) data, the visible points are identical
+                // to the previous frame at phase=1 with the old data — no visual glitch.
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    cpuHistory = h.cpuHistory
+                    memHistory = h.memHistory
+                    diskReadHistory = h.diskReadHistory
+                    diskWriteHistory = h.diskWriteHistory
+                    downloadHistory = h.downloadHistory
+                    uploadHistory = h.uploadHistory
+                    scrollPhase = 0
+                }
+
+                // Animate the scroll over the poll interval. The phase drives horizontal
+                // translation of all chart points, creating smooth continuous scrolling
+                // instead of the per-point Y interpolation that caused "wiggling".
+                if h.cpuHistory.count > SystemPerformanceWidget.SharedHistory.maxHistory {
+                    DispatchQueue.main.async {
+                        withAnimation(.linear(duration: 2.0)) {
+                            scrollPhase = 1.0
+                        }
+                    }
+                }
             }
         }
     }
@@ -345,6 +381,7 @@ private struct MetricCard: View {
     let color: Color
     let sparklineColor: Color
     let theme: LedgeTheme
+    let scrollPhase: CGFloat
 
     var body: some View {
         GeometryReader { geo in
@@ -354,7 +391,7 @@ private struct MetricCard: View {
 
                 // Sparkline fills entire card
                 if !history.isEmpty {
-                    SparklineView(data: history, color: sparklineColor)
+                    SparklineView(data: history, color: sparklineColor, scrollPhase: scrollPhase)
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -397,6 +434,7 @@ private struct DiskCard: View {
     let diskPercent: Double
     let color: Color
     let theme: LedgeTheme
+    let scrollPhase: CGFloat
 
     var body: some View {
         GeometryReader { geo in
@@ -409,7 +447,8 @@ private struct DiskCard: View {
                     downloadHistory: readHistory,
                     uploadHistory: writeHistory,
                     isVertical: geo.size.height > geo.size.width,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
             .overlay(alignment: .topLeading) {
@@ -458,6 +497,7 @@ private struct NetworkCard: View {
     let currentDown: Double
     let currentUp: Double
     let theme: LedgeTheme
+    let scrollPhase: CGFloat
 
     var body: some View {
         GeometryReader { geo in
@@ -467,7 +507,8 @@ private struct NetworkCard: View {
                     downloadHistory: downloadHistory,
                     uploadHistory: uploadHistory,
                     isVertical: geo.size.height > geo.size.width,
-                    theme: theme
+                    theme: theme,
+                    scrollPhase: scrollPhase
                 )
             }
             .overlay(alignment: .topLeading) {
@@ -503,12 +544,13 @@ private struct BandwidthGraphView: View {
     let uploadHistory: [Double]
     let isVertical: Bool
     let theme: LedgeTheme
+    let scrollPhase: CGFloat
 
     private let downloadColor: Color = .cyan
     private let uploadColor: Color = .orange
+    private let visibleCount = SystemPerformanceWidget.SharedHistory.maxHistory
 
-    /// Pre-normalize both histories against their shared max for animation.
-    /// This lets the animatable shapes interpolate normalized 0–1 values.
+    /// Pre-normalize both histories against their shared max.
     private var maxVal: Double {
         max(downloadHistory.max() ?? 0, uploadHistory.max() ?? 0, 1024)
     }
@@ -529,33 +571,41 @@ private struct BandwidthGraphView: View {
             ZStack {
                 // Download fill
                 BandwidthFillShape(
-                    data: AnimatableVector(normalizedDown),
+                    data: normalizedDown,
+                    scrollPhase: scrollPhase,
                     isAbove: true,
-                    isVertical: isVertical
+                    isVertical: isVertical,
+                    visibleCount: visibleCount
                 )
                 .fill(downloadColor.opacity(0.3))
 
                 // Download stroke
                 BandwidthStrokeShape(
-                    data: AnimatableVector(normalizedDown),
+                    data: normalizedDown,
+                    scrollPhase: scrollPhase,
                     isAbove: true,
-                    isVertical: isVertical
+                    isVertical: isVertical,
+                    visibleCount: visibleCount
                 )
                 .stroke(downloadColor, lineWidth: 1.5)
 
                 // Upload fill
                 BandwidthFillShape(
-                    data: AnimatableVector(normalizedUp),
+                    data: normalizedUp,
+                    scrollPhase: scrollPhase,
                     isAbove: false,
-                    isVertical: isVertical
+                    isVertical: isVertical,
+                    visibleCount: visibleCount
                 )
                 .fill(uploadColor.opacity(0.3))
 
                 // Upload stroke
                 BandwidthStrokeShape(
-                    data: AnimatableVector(normalizedUp),
+                    data: normalizedUp,
+                    scrollPhase: scrollPhase,
                     isAbove: false,
-                    isVertical: isVertical
+                    isVertical: isVertical,
+                    visibleCount: visibleCount
                 )
                 .stroke(uploadColor, lineWidth: 1.5)
 
@@ -574,60 +624,75 @@ private struct BandwidthGraphView: View {
                     .stroke(theme.primaryText.opacity(0.15), lineWidth: 0.5)
                 }
             }
-            .animation(.easeOut(duration: 0.6), value: AnimatableVector(normalizedDown))
-            .animation(.easeOut(duration: 0.6), value: AnimatableVector(normalizedUp))
+            .clipped()
         }
     }
 }
 
 /// Animatable fill shape for a bandwidth half (above or below center).
+/// Scrolls horizontally (or vertically) via `scrollPhase` instead of
+/// interpolating Y values, preventing the "wiggling" artifact.
 private struct BandwidthFillShape: Shape {
-    var data: AnimatableVector
+    var data: [Double]
+    var scrollPhase: CGFloat
     let isAbove: Bool
     let isVertical: Bool
+    let visibleCount: Int
 
-    var animatableData: AnimatableVector {
-        get { data }
-        set { data = newValue }
+    var animatableData: CGFloat {
+        get { scrollPhase }
+        set { scrollPhase = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
-        let values = data.values
-        guard values.count > 1 else { return Path() }
-        let count = values.count
+        guard data.count > 1 else { return Path() }
+        let count = data.count
+        let isScrolling = count > visibleCount
 
         if isVertical {
             let mid = rect.width / 2
-            let points = values.enumerated().map { i, val in
-                let y = rect.height * Double(i) / Double(count - 1)
+            let stepHeight: CGFloat
+            if isScrolling {
+                stepHeight = rect.height / CGFloat(visibleCount - 1)
+            } else {
+                stepHeight = rect.height / CGFloat(count - 1)
+            }
+            let yOffset = isScrolling ? scrollPhase * stepHeight : 0
+
+            let points = data.enumerated().map { i, val in
+                let y = CGFloat(i) * stepHeight - yOffset
                 let x = isAbove
-                    ? mid + (mid * min(max(val, 0), 1.0))
-                    : mid - (mid * min(max(val, 0), 1.0))
+                    ? mid + (mid * min(max(CGFloat(val), 0), 1.0))
+                    : mid - (mid * min(max(CGFloat(val), 0), 1.0))
                 return CGPoint(x: x, y: y)
             }
             var path = Path()
-            path.move(to: CGPoint(x: mid, y: 0))
-            // Trace along the curve points
-            appendCatmullRomCurve(to: &path, points: points, from: points[0])
-            // Close back along the center line
-            path.addLine(to: CGPoint(x: mid, y: rect.height))
+            path.move(to: CGPoint(x: mid, y: points[0].y))
+            appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: mid, y: points[0].y))
+            path.addLine(to: CGPoint(x: mid, y: points[count - 1].y))
             path.closeSubpath()
             return path
         } else {
             let mid = rect.height / 2
-            let points = values.enumerated().map { i, val in
-                let x = rect.width * Double(i) / Double(count - 1)
+            let stepWidth: CGFloat
+            if isScrolling {
+                stepWidth = rect.width / CGFloat(visibleCount - 1)
+            } else {
+                stepWidth = rect.width / CGFloat(count - 1)
+            }
+            let xOffset = isScrolling ? scrollPhase * stepWidth : 0
+
+            let points = data.enumerated().map { i, val in
+                let x = CGFloat(i) * stepWidth - xOffset
                 let y = isAbove
-                    ? mid - (mid * min(max(val, 0), 1.0))
-                    : mid + (mid * min(max(val, 0), 1.0))
+                    ? mid - (mid * min(max(CGFloat(val), 0), 1.0))
+                    : mid + (mid * min(max(CGFloat(val), 0), 1.0))
                 return CGPoint(x: x, y: y)
             }
             var path = Path()
-            path.move(to: CGPoint(x: 0, y: mid))
-            // Trace along the curve points
-            appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: 0, y: mid))
-            // Close back along the center line
-            path.addLine(to: CGPoint(x: rect.width, y: mid))
+            path.move(to: CGPoint(x: points[0].x, y: mid))
+            appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: points[0].x, y: mid))
+            path.addLine(to: CGPoint(x: points[count - 1].x, y: mid))
             path.closeSubpath()
             return path
         }
@@ -636,37 +701,55 @@ private struct BandwidthFillShape: Shape {
 
 /// Animatable stroke shape for a bandwidth half (above or below center).
 private struct BandwidthStrokeShape: Shape {
-    var data: AnimatableVector
+    var data: [Double]
+    var scrollPhase: CGFloat
     let isAbove: Bool
     let isVertical: Bool
+    let visibleCount: Int
 
-    var animatableData: AnimatableVector {
-        get { data }
-        set { data = newValue }
+    var animatableData: CGFloat {
+        get { scrollPhase }
+        set { scrollPhase = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
-        let values = data.values
-        guard values.count > 1 else { return Path() }
-        let count = values.count
+        guard data.count > 1 else { return Path() }
+        let count = data.count
+        let isScrolling = count > visibleCount
 
         if isVertical {
             let mid = rect.width / 2
-            let points = values.enumerated().map { i, val in
-                let y = rect.height * Double(i) / Double(count - 1)
+            let stepHeight: CGFloat
+            if isScrolling {
+                stepHeight = rect.height / CGFloat(visibleCount - 1)
+            } else {
+                stepHeight = rect.height / CGFloat(count - 1)
+            }
+            let yOffset = isScrolling ? scrollPhase * stepHeight : 0
+
+            let points = data.enumerated().map { i, val in
+                let y = CGFloat(i) * stepHeight - yOffset
                 let x = isAbove
-                    ? mid + (mid * min(max(val, 0), 1.0))
-                    : mid - (mid * min(max(val, 0), 1.0))
+                    ? mid + (mid * min(max(CGFloat(val), 0), 1.0))
+                    : mid - (mid * min(max(CGFloat(val), 0), 1.0))
                 return CGPoint(x: x, y: y)
             }
             return catmullRomPath(points: points)
         } else {
             let mid = rect.height / 2
-            let points = values.enumerated().map { i, val in
-                let x = rect.width * Double(i) / Double(count - 1)
+            let stepWidth: CGFloat
+            if isScrolling {
+                stepWidth = rect.width / CGFloat(visibleCount - 1)
+            } else {
+                stepWidth = rect.width / CGFloat(count - 1)
+            }
+            let xOffset = isScrolling ? scrollPhase * stepWidth : 0
+
+            let points = data.enumerated().map { i, val in
+                let x = CGFloat(i) * stepWidth - xOffset
                 let y = isAbove
-                    ? mid - (mid * min(max(val, 0), 1.0))
-                    : mid + (mid * min(max(val, 0), 1.0))
+                    ? mid - (mid * min(max(CGFloat(val), 0), 1.0))
+                    : mid + (mid * min(max(CGFloat(val), 0), 1.0))
                 return CGPoint(x: x, y: y)
             }
             return catmullRomPath(points: points)
@@ -715,11 +798,14 @@ private struct CompactMetric: View {
 private struct SparklineView: View {
     let data: [Double]
     let color: Color
+    let scrollPhase: CGFloat
+
+    private let visibleCount = SystemPerformanceWidget.SharedHistory.maxHistory
 
     var body: some View {
         ZStack {
             // Fill (rendered first, behind the line)
-            SparklineFillShape(data: AnimatableVector(data))
+            SparklineFillShape(data: data, scrollPhase: scrollPhase, visibleCount: visibleCount)
                 .fill(
                     LinearGradient(
                         colors: [color.opacity(0.35), color.opacity(0.05)],
@@ -729,39 +815,51 @@ private struct SparklineView: View {
                 )
 
             // Line (on top)
-            SparklineStrokeShape(data: AnimatableVector(data))
+            SparklineStrokeShape(data: data, scrollPhase: scrollPhase, visibleCount: visibleCount)
                 .stroke(color.opacity(0.9), lineWidth: 2)
         }
-        .animation(.easeOut(duration: 0.6), value: AnimatableVector(data))
+        .clipped()
     }
 }
 
 /// Animatable shape for the sparkline fill area.
+/// Uses `scrollPhase` to translate horizontally rather than interpolating
+/// per-point Y values, which eliminates the "wiggling worm" artifact.
 private struct SparklineFillShape: Shape {
-    var data: AnimatableVector
+    var data: [Double]
+    var scrollPhase: CGFloat
+    let visibleCount: Int
 
-    var animatableData: AnimatableVector {
-        get { data }
-        set { data = newValue }
+    var animatableData: CGFloat {
+        get { scrollPhase }
+        set { scrollPhase = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
-        let values = data.values
-        guard values.count > 1 else { return Path() }
+        guard data.count > 1 else { return Path() }
 
-        let points = values.enumerated().map { index, value in
+        let isScrolling = data.count > visibleCount
+        let stepWidth: CGFloat
+        if isScrolling {
+            stepWidth = rect.width / CGFloat(visibleCount - 1)
+        } else {
+            stepWidth = rect.width / CGFloat(data.count - 1)
+        }
+        let xOffset = isScrolling ? scrollPhase * stepWidth : 0
+
+        let points = data.enumerated().map { index, value in
             CGPoint(
-                x: rect.width * Double(index) / Double(values.count - 1),
-                y: rect.height * (1 - min(max(value, 0), 1.0))
+                x: CGFloat(index) * stepWidth - xOffset,
+                y: rect.height * (1 - min(max(CGFloat(value), 0), 1.0))
             )
         }
 
         var path = Path()
-        path.move(to: CGPoint(x: 0, y: rect.height))
+        path.move(to: CGPoint(x: points[0].x, y: rect.height))
         // Line up to the first data point, then trace the curve
-        appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: 0, y: rect.height))
+        appendCatmullRomCurve(to: &path, points: points, from: CGPoint(x: points[0].x, y: rect.height))
         // Close back to bottom-right
-        path.addLine(to: CGPoint(x: rect.width, y: rect.height))
+        path.addLine(to: CGPoint(x: points[points.count - 1].x, y: rect.height))
         path.closeSubpath()
         return path
     }
@@ -769,69 +867,35 @@ private struct SparklineFillShape: Shape {
 
 /// Animatable shape for the sparkline stroke.
 private struct SparklineStrokeShape: Shape {
-    var data: AnimatableVector
+    var data: [Double]
+    var scrollPhase: CGFloat
+    let visibleCount: Int
 
-    var animatableData: AnimatableVector {
-        get { data }
-        set { data = newValue }
+    var animatableData: CGFloat {
+        get { scrollPhase }
+        set { scrollPhase = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
-        let values = data.values
-        guard values.count > 1 else { return Path() }
+        guard data.count > 1 else { return Path() }
 
-        let points = values.enumerated().map { index, value in
+        let isScrolling = data.count > visibleCount
+        let stepWidth: CGFloat
+        if isScrolling {
+            stepWidth = rect.width / CGFloat(visibleCount - 1)
+        } else {
+            stepWidth = rect.width / CGFloat(data.count - 1)
+        }
+        let xOffset = isScrolling ? scrollPhase * stepWidth : 0
+
+        let points = data.enumerated().map { index, value in
             CGPoint(
-                x: rect.width * Double(index) / Double(values.count - 1),
-                y: rect.height * (1 - min(max(value, 0), 1.0))
+                x: CGFloat(index) * stepWidth - xOffset,
+                y: rect.height * (1 - min(max(CGFloat(value), 0), 1.0))
             )
         }
 
         return catmullRomPath(points: points)
-    }
-}
-
-// MARK: - Animatable Vector
-//
-// VectorArithmetic-conforming wrapper around [Double] so SwiftUI can
-// interpolate between two arrays of doubles during animation.
-
-private struct AnimatableVector: VectorArithmetic, Equatable {
-    var values: [Double]
-
-    init(_ values: [Double]) { self.values = values }
-
-    static var zero: AnimatableVector { AnimatableVector([]) }
-
-    /// Extend a shorter array to match the target count by repeating the last value.
-    /// This prevents the "rise from 0" artifact when the history array grows.
-    private static func aligned(_ arr: [Double], count: Int) -> [Double] {
-        if arr.count >= count { return arr }
-        if arr.isEmpty { return [Double](repeating: 0, count: count) }
-        let pad = arr.last!
-        return arr + [Double](repeating: pad, count: count - arr.count)
-    }
-
-    static func + (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
-        let count = max(lhs.values.count, rhs.values.count)
-        let l = aligned(lhs.values, count: count)
-        let r = aligned(rhs.values, count: count)
-        return AnimatableVector(zip(l, r).map { $0 + $1 })
-    }
-
-    static func - (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
-        let count = max(lhs.values.count, rhs.values.count)
-        let l = aligned(lhs.values, count: count)
-        let r = aligned(rhs.values, count: count)
-        return AnimatableVector(zip(l, r).map { $0 - $1 })
-    }
-
-    mutating func scale(by rhs: Double) {
-        for i in values.indices { values[i] *= rhs }
-    }
-
-    var magnitudeSquared: Double {
-        values.reduce(0) { $0 + $1 * $1 }
     }
 }
 
@@ -897,8 +961,6 @@ private func addCatmullRomSegments(to path: inout Path, points: [CGPoint]) {
         path.addCurve(to: p2, control1: cp1, control2: cp2)
     }
 }
-
-// MARK: - Rate Formatting
 
 private func formatRate(_ bytesPerSec: Double) -> String {
     if bytesPerSec < 1024 { return String(format: "%.0f B/s", bytesPerSec) }

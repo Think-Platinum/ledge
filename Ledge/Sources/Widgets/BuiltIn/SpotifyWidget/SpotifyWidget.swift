@@ -73,6 +73,12 @@ struct SpotifyWidgetView: View {
         config.useWebAPI && authManager.isAuthenticated
     }
 
+    /// Controls visibility of track text for coordinated transitions.
+    /// Set to `false` to conceal text, `true` to reveal.
+    @State private var textContentVisible = true
+    /// Timestamp when the current track name was first detected (for reveal delay).
+    @State private var trackChangeTime: Date?
+
     private let pollTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let positionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -101,6 +107,24 @@ struct SpotifyWidgetView: View {
             if state.isPlaying && !isSeeking {
                 state.playerPosition += 1
             }
+
+            // Auto-advance: conceal text when within 1.5s of track end
+            if state.isPlaying && textContentVisible
+                && state.trackDuration > 3
+                && state.playerPosition >= state.trackDuration - 1.5 {
+                textContentVisible = false
+            }
+
+            // Reveal text ~1s after a track change was detected
+            if !textContentVisible, let changeTime = trackChangeTime,
+               Date().timeIntervalSince(changeTime) >= 1.0 {
+                textContentVisible = true
+                trackChangeTime = nil
+                // Start art crossfade alongside the text reveal
+                withAnimation(.easeInOut(duration: 0.8)) {
+                    artworkTransitionProgress = 1.0
+                }
+            }
         }
         .onReceive(configStore.configDidChange) { changedID in
             if changedID == instanceID { loadConfig() }
@@ -128,20 +152,26 @@ struct SpotifyWidgetView: View {
         }
         .onChange(of: state.artworkURL) { _, newURL in
             if !newURL.isEmpty && newURL != lastArtworkURL {
-                // Store the old URL for crossfade, then start transition
                 previousArtworkURL = lastArtworkURL
                 lastArtworkURL = newURL
 
-                // Reset transition progress — old art visible
+                // Hold at old art — the crossfade is triggered by the
+                // position timer when text reveal starts (~1s into new track).
                 artworkTransitionProgress = 0.0
 
-                // Animate crossfade in sync with the background colour transition (0.8s)
-                withAnimation(.easeInOut(duration: 0.8)) {
-                    artworkTransitionProgress = 1.0
-                }
-
-                // Extract colours — also animates at 0.8s easeInOut internally
+                // Pre-extract colours so they're ready when the reveal fires
                 extractColors(from: newURL)
+            }
+        }
+        .onChange(of: state.trackName) { oldValue, newValue in
+            if oldValue != newValue && !newValue.isEmpty {
+                trackChangeTime = Date()
+
+                // If text is still visible (manual skip — didn't hit end-of-track
+                // detection), conceal now. The reveal timer will fire ~1s later.
+                if textContentVisible {
+                    textContentVisible = false
+                }
             }
         }
     }
@@ -167,13 +197,13 @@ struct SpotifyWidgetView: View {
                     text: state.trackName,
                     font: .system(size: 18, weight: .semibold),
                     color: .white,
-                    trigger: state.trackName
+                    isContentVisible: textContentVisible
                 )
                 MarqueeText(
                     text: state.artistName,
                     font: .system(size: 14),
                     color: .white.opacity(0.6),
-                    trigger: state.artistName
+                    isContentVisible: textContentVisible
                 )
                 if !deviceName.isEmpty {
                     deviceLabel(fontSize: 10)
@@ -238,19 +268,19 @@ struct SpotifyWidgetView: View {
                         text: state.trackName,
                         font: .system(size: 22, weight: .semibold),
                         color: .white,
-                        trigger: state.trackName
+                        isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.artistName,
                         font: .system(size: 16),
                         color: .white.opacity(0.65),
-                        trigger: state.artistName
+                        isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.albumName,
                         font: .system(size: 14),
                         color: .white.opacity(0.4),
-                        trigger: state.albumName
+                        isContentVisible: textContentVisible
                     )
                     if !deviceName.isEmpty {
                         deviceLabel(fontSize: 11)
@@ -377,19 +407,19 @@ struct SpotifyWidgetView: View {
                         text: state.trackName,
                         font: .system(size: 28, weight: .semibold),
                         color: .white,
-                        trigger: state.trackName
+                        isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.artistName,
                         font: .system(size: 20),
                         color: .white.opacity(0.75),
-                        trigger: state.artistName
+                        isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.albumName,
                         font: .system(size: 16),
                         color: .white.opacity(0.5),
-                        trigger: state.albumName
+                        isContentVisible: textContentVisible
                     )
                     if !deviceName.isEmpty {
                         deviceLabel(fontSize: 12)
@@ -577,17 +607,14 @@ struct SpotifyWidgetView: View {
         }
     }
 
-    // MARK: - Album Colour Glow
+    // MARK: - Album Colour Bleed
 
-    /// Renders a radial glow emanating from the album art position,
-    /// using the extracted album colours.
+    /// Renders album art colour bleed so the art appears to have no edges.
     ///
-    /// Behaviour changes with the widget background style:
-    /// - **Solid / Blur**: Glow radiates from the album art and fades
-    ///   to clear at the edges — the container background (theme colour
-    ///   or frosted blur) shows through where the glow ends.
-    /// - **Transparent**: No glow at all — the widget is fully see-through
-    ///   and only the album art, text, and controls are visible.
+    /// The background directly adjacent to the album art matches the art's
+    /// actual edge pixel colours at full opacity. On the left/top/bottom,
+    /// there's almost no fade (the art fills most of the widget height).
+    /// On the right, the trailing edge colour fades across the text area.
     @ViewBuilder
     private func albumColorGlow(size: CGSize) -> some View {
         // In transparent mode, no background glow — widget is fully clear
@@ -595,42 +622,48 @@ struct SpotifyWidgetView: View {
             EmptyView()
         } else if config.showAlbumColors, let colors = albumColors {
             let artSize = artSizeForHeight(size.height)
+            let artPad = artPaddingForHeight(size.height)
+            // Album art right edge as a proportion of the widget width
+            let artRightX = (artPad + artSize) / max(size.width, 1)
 
-            // Anchor point: centre of the album art (left-aligned with padding)
-            let artCenterX = artPaddingForHeight(size.height) + artSize / 2
-            let artCenterY = size.height / 2
-
-            // Normalise the anchor to UnitPoint (0-1 range)
-            let anchorX = artCenterX / max(size.width, 1)
-            let anchorY = artCenterY / max(size.height, 1)
-
-            // The glow extends past the art and fades to clear.
-            // Layered radial gradients create depth — primary near
-            // the art, secondary wash extending further right.
             ZStack {
-                // Primary colour — strong near the art, fades outward
-                RadialGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: colors.primary.opacity(0.9), location: 0.0),
-                        .init(color: colors.primary.opacity(0.6), location: 0.25),
-                        .init(color: colors.secondary.opacity(0.3), location: 0.55),
+                // Horizontal base: solid edge colors across the art area,
+                // then trailing edge fades across the text/controls area.
+                // At the art's left edge → edgeLeading (full opacity).
+                // At the art's right edge → edgeTrailing (full opacity).
+                // Beyond the art → fades to clear, revealing widget background.
+                LinearGradient(
+                    stops: [
+                        .init(color: colors.edgeLeading, location: 0.0),
+                        .init(color: colors.edgeTrailing, location: artRightX),
+                        .init(color: colors.edgeTrailing.opacity(0.35), location: artRightX + (1 - artRightX) * 0.5),
                         .init(color: .clear, location: 1.0)
-                    ]),
-                    center: UnitPoint(x: anchorX, y: anchorY),
-                    startRadius: artSize * 0.3,
-                    endRadius: max(size.width, size.height) * 0.95
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
                 )
 
-                // Secondary accent — a softer fill that extends further
-                RadialGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: colors.secondary.opacity(0.4), location: 0.0),
-                        .init(color: colors.secondary.opacity(0.15), location: 0.5),
-                        .init(color: .clear, location: 1.0)
-                    ]),
-                    center: UnitPoint(x: anchorX * 1.5, y: anchorY),
-                    startRadius: artSize * 0.5,
-                    endRadius: size.width * 0.8
+                // Top edge: full-opacity strip covering the thin gap above the art.
+                // Fades down quickly since the art fills ~90% of the widget height.
+                LinearGradient(
+                    stops: [
+                        .init(color: colors.edgeTop, location: 0.0),
+                        .init(color: colors.edgeTop.opacity(0.3), location: 0.1),
+                        .init(color: .clear, location: 0.25)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                // Bottom edge: full-opacity strip covering the thin gap below the art.
+                LinearGradient(
+                    stops: [
+                        .init(color: colors.edgeBottom, location: 0.0),
+                        .init(color: colors.edgeBottom.opacity(0.3), location: 0.1),
+                        .init(color: .clear, location: 0.25)
+                    ],
+                    startPoint: .bottom,
+                    endPoint: .top
                 )
             }
         }
@@ -943,31 +976,34 @@ struct SpotifyWidgetView: View {
     }
 }
 
-// MARK: - Marquee Text (bouncing scroll for overflowing text + reveal animation)
+// MARK: - Marquee Text (bouncing scroll for overflowing text + wipe transitions)
 
-/// Displays text that bounces back and forth when it's too wide for its container.
-/// When the text changes, a left-to-right reveal sweep animates the new text in,
-/// giving a character-by-character appearance effect.
+/// Displays text that gently bounces side-to-side when too wide for its container.
+/// When the text changes, a coordinated wipe transition plays:
+///   1. Current text wipes out left-to-right (conceal sweep, ~0.6s)
+///   2. New text wipes in left-to-right (reveal sweep, ~0.8s)
+///   3. If the new text overflows, gentle bounce scroll begins
 ///
 /// Uses PhaseAnimator (macOS 14+) to cycle between start and end offsets for scrolling.
 private struct MarqueeText: View {
     let text: String
     let font: Font
     let color: Color
-    let trigger: String
+    /// Driven by the parent — `false` to conceal, `true` to reveal.
+    let isContentVisible: Bool
 
     @State private var textWidth: CGFloat = 0
     @State private var containerWidth: CGFloat = 0
 
     /// The text actually displayed — lags behind `text` so the old string
-    /// is visible during the fade-out phase before swapping to the new one.
+    /// is visible during the conceal phase before swapping to the new one.
     @State private var displayText: String = ""
     /// Controls the left-to-right reveal sweep (0 = hidden, 1 = fully visible).
     @State private var revealProgress: CGFloat = 1.0
-    /// Controls the overall text opacity for fade-out / fade-in transitions.
-    @State private var textOpacity: CGFloat = 1.0
-    /// True while a transition is in progress (prevents overlapping animations).
-    @State private var isTransitioning = false
+    /// Controls the left-to-right conceal sweep (0 = fully visible, 1 = hidden).
+    @State private var concealProgress: CGFloat = 0.0
+    /// Incremented on each text change to re-trigger the PhaseAnimator scroll.
+    @State private var scrollTrigger: Int = 0
 
     /// Only scroll if the text overflows by more than 10pt.
     /// Prevents unnecessary scrolling for tiny measurement differences
@@ -991,7 +1027,7 @@ private struct MarqueeText: View {
                 if overflow > 0 {
                     let scrollDuration = max(Double(overflow) / 30.0, 1.0)
 
-                    PhaseAnimator([false, true], trigger: trigger) { scrolled in
+                    PhaseAnimator([false, true], trigger: scrollTrigger) { scrolled in
                         innerText
                             .offset(x: scrolled ? -overflow : 0)
                     } animation: { phase in
@@ -1004,30 +1040,32 @@ private struct MarqueeText: View {
                     innerText
                 }
             }
-            .onChange(of: text) { oldValue, newValue in
-                // Only animate when the actual content changes
-                if oldValue != newValue && !newValue.isEmpty {
-                    guard !isTransitioning else { return }
-                    isTransitioning = true
-
-                    // Phase 1: Fade out the OLD text (1 second)
-                    // displayText still shows the old string here
-                    withAnimation(.easeIn(duration: 1.0)) {
-                        textOpacity = 0
+            .onChange(of: isContentVisible) { wasVisible, nowVisible in
+                if !nowVisible {
+                    // Conceal: wipe out L→R (0.6s)
+                    concealProgress = 0.0
+                    withAnimation(.easeIn(duration: 0.6)) {
+                        concealProgress = 1.0
                     }
-
-                    // Phase 2: After fade-out, swap to new text and fade in (2 seconds)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        displayText = newValue
-                        revealProgress = 0
-                        withAnimation(.easeOut(duration: 2.0)) {
-                            textOpacity = 1.0
-                            revealProgress = 1.0
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                            isTransitioning = false
-                        }
+                } else {
+                    // Reveal: swap to new text, wipe in L→R (0.8s)
+                    displayText = text
+                    concealProgress = 0.0
+                    revealProgress = 0.0
+                    withAnimation(.easeOut(duration: 0.8)) {
+                        revealProgress = 1.0
                     }
+                    // Restart bounce scroll after reveal completes
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+                        scrollTrigger += 1
+                    }
+                }
+            }
+            .onChange(of: text) { _, newValue in
+                // If text changes while visible (e.g. first load), update immediately
+                if isContentVisible {
+                    displayText = newValue
+                    scrollTrigger += 1
                 }
             }
             .onAppear {
@@ -1040,8 +1078,7 @@ private struct MarqueeText: View {
             .font(font)
             .foregroundStyle(color)
             .fixedSize(horizontal: true, vertical: false)
-            .opacity(textOpacity)
-            .mask(revealMask)
+            .mask(activeMask)
             .background(
                 GeometryReader { geo in
                     Color.clear
@@ -1051,32 +1088,63 @@ private struct MarqueeText: View {
             )
     }
 
+    /// Selects the appropriate mask based on the current transition phase.
+    @ViewBuilder
+    private var activeMask: some View {
+        if concealProgress > 0 && concealProgress < 1.0 {
+            concealMask
+        } else if revealProgress < 1.0 {
+            revealMask
+        } else {
+            Rectangle()
+        }
+    }
+
     /// A gradient mask that sweeps left-to-right to reveal text.
     /// When revealProgress is 1.0, the mask is fully opaque (no effect).
     /// When animating from 0 → 1, it creates a soft "wipe" that gives
     /// the appearance of characters fading in from left to right.
     @ViewBuilder
     private var revealMask: some View {
-        if revealProgress >= 1.0 {
-            // Fully revealed — no mask needed
-            Rectangle()
-        } else {
-            GeometryReader { geo in
-                let sweepWidth = geo.size.width + 40  // extra for soft edge
-                let offset = -sweepWidth + (sweepWidth + geo.size.width) * revealProgress
+        GeometryReader { geo in
+            let sweepWidth = geo.size.width + 40  // extra for soft edge
+            let offset = -sweepWidth + (sweepWidth + geo.size.width) * revealProgress
 
-                LinearGradient(
-                    stops: [
-                        .init(color: .white, location: 0),
-                        .init(color: .white, location: 0.7),
-                        .init(color: .clear, location: 1.0)
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: sweepWidth)
-                .offset(x: offset)
-            }
+            LinearGradient(
+                stops: [
+                    .init(color: .white, location: 0),
+                    .init(color: .white, location: 0.7),
+                    .init(color: .clear, location: 1.0)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: sweepWidth)
+            .offset(x: offset)
+        }
+    }
+
+    /// A gradient mask that sweeps left-to-right to conceal text.
+    /// When concealProgress is 0.0, the mask is fully opaque (text visible).
+    /// When animating from 0 → 1, it clears text from the left edge first,
+    /// creating a "scrubbing away" effect.
+    @ViewBuilder
+    private var concealMask: some View {
+        GeometryReader { geo in
+            let sweepWidth = geo.size.width + 40
+            // The clear region grows from the left as concealProgress increases
+            let clearEnd = (geo.size.width + sweepWidth) * concealProgress - sweepWidth
+
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .clear, location: max(0, (clearEnd / geo.size.width))),
+                    .init(color: .white, location: min(1.0, (clearEnd / geo.size.width) + 0.1)),
+                    .init(color: .white, location: 1.0)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
         }
     }
 }

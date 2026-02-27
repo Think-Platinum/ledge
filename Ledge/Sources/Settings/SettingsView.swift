@@ -24,6 +24,9 @@ struct SettingsView: View {
                 NavigationLink(destination: AppearanceSettingsView()) {
                     Label("Appearance", systemImage: "paintpalette")
                 }
+                NavigationLink(destination: DeveloperSettingsView()) {
+                    Label("Developer", systemImage: "wrench.and.screwdriver")
+                }
                 NavigationLink(destination: AboutView()) {
                     Label("About", systemImage: "info.circle")
                 }

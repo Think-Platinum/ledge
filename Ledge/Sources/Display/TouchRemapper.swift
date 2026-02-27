@@ -76,6 +76,11 @@ nonisolated class TouchRemapper {
     /// Callback invoked when learning completes.
     var onLearningComplete: (() -> Void)?
 
+    /// When true, the remapper only suppresses touchscreen events (returns nil)
+    /// without remapping or delivering them. Used when HIDTouchReader is handling
+    /// direct touch delivery from the digitizer interface.
+    var suppressionOnly: Bool = false
+
     /// Callback invoked when a touchscreen event is processed (for diagnostics).
     /// Parameters: device ID, original coordinates, remapped coordinates (nil if failed),
     /// event type raw value, delivery status, sequence ID, timestamp of CGEvent arrival.
@@ -162,6 +167,12 @@ nonisolated class TouchRemapper {
 
     /// Stop the touch remapper.
     func stop() {
+        tearDownTap()
+        logger.notice("Touch remapper stopped")
+    }
+
+    /// Tear down the current event tap (preserves learned device IDs and settings).
+    private func tearDownTap() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -173,7 +184,25 @@ nonisolated class TouchRemapper {
         isActive = false
         isTrackingTouch = false
         moveLogCounter = 0
-        logger.notice("Touch remapper stopped")
+    }
+
+    /// Tear down and recreate the event tap.
+    ///
+    /// Used by the watchdog when a tap re-enable fails — macOS may have
+    /// permanently disabled the old tap, so we need a fresh one.
+    func recreateTap() {
+        guard let target = targetScreen else {
+            logger.error("Cannot recreate tap — no target screen")
+            return
+        }
+        logger.notice("♻️ Recreating CGEventTap...")
+        tearDownTap()
+        start(targetScreen: target)
+        if isActive {
+            logger.notice("♻️ CGEventTap recreated successfully")
+        } else {
+            logger.error("♻️ CGEventTap recreation FAILED")
+        }
     }
 
     /// Enter "learning mode" — the next touch event on the primary display will be
@@ -280,6 +309,15 @@ nonisolated class TouchRemapper {
         // ══════════════════════════════════════════════════════════════════
         // This IS from the touchscreen device — suppress and deliver to panel.
         // ══════════════════════════════════════════════════════════════════
+
+        // ── Suppression-only mode ──
+        // When HIDTouchReader is handling delivery, we only need to suppress
+        // the wrongly-mapped mouse event. No remapping, delivery, or diagnostics
+        // needed — HIDTouchReader handles its own flight recorder entries.
+        // Return nil as fast as possible to avoid CGEventTap timeout.
+        if suppressionOnly {
+            return nil
+        }
 
         // Capture arrival time for latency measurement
         let arrivalTime = Date()
