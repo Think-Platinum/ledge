@@ -343,7 +343,7 @@ private struct VerticalBarBackground: View {
                     .frame(width: max(barWidth * 0.15, 0))
                 Spacer(minLength: 0)
             }
-            .animation(.easeInOut(duration: 1.0), value: percent)
+            .animation(.linear(duration: 2.0), value: percent)
         }
     }
 }
@@ -784,6 +784,7 @@ private struct CompactMetric: View {
                     .trim(from: 0, to: min(percent, 1.0))
                     .stroke(color, style: StrokeStyle(lineWidth: 4, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 2.0), value: percent)
             }
             .frame(width: 40, height: 40)
         }

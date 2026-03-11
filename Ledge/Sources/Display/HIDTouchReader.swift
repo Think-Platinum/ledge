@@ -185,6 +185,16 @@ nonisolated class HIDTouchReader {
         logger.notice("HID Touch Reader started — listening for digitizer reports on VID=\(Self.touchVendorID)/PID=\(Self.touchProductID)")
         let debugCount = self.debugReportLogCount
         logger.notice("  Panel: \(Int(self.panelWidth))×\(Int(self.panelHeight)), debug reports: \(debugCount)")
+
+        // Check Input Monitoring permission — IOKit HID report callbacks
+        // require this separately from Accessibility (which CGEventTap uses).
+        let inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        if !inputMonitoringGranted {
+            let status = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+            logger.warning("⚠ Input Monitoring permission NOT granted (status=\(status.rawValue)). HID report callbacks will not fire. Grant in System Settings > Privacy & Security > Input Monitoring.")
+        } else {
+            logger.notice("✓ Input Monitoring permission granted")
+        }
     }
 
     /// Stop listening and release resources.

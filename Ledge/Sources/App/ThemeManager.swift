@@ -206,6 +206,25 @@ enum DashboardBackgroundMode: String, Codable, CaseIterable {
     var displayName: String { rawValue }
 }
 
+/// Periodic visual effect mode for the dashboard.
+enum VisualEffectMode: String, Codable, CaseIterable {
+    case off        = "Off"
+    case lightWave  = "Light Wave"
+    case waterDrop  = "Water Drop"
+    case twinkle    = "Twinkle"
+
+    var displayName: String { rawValue }
+
+    var description: String {
+        switch self {
+        case .off:       return ""
+        case .lightWave: return "A band of light sweeps across the dashboard at a random angle."
+        case .waterDrop: return "A water droplet ripple expands from a random point, bending the display like liquid glass."
+        case .twinkle:   return "Subtle sparkles catch the edges of widgets, like light reflecting off glass."
+        }
+    }
+}
+
 // MARK: - Theme Manager
 
 @Observable
@@ -264,10 +283,30 @@ class ThemeManager {
     /// Populated by `loadDesktopWallpaper(for:)` when the panel is shown.
     var desktopWallpaper: NSImage? = nil
 
+    // MARK: - Visual Effects
+
+    /// Which periodic visual effect to play on the dashboard.
+    var visualEffect: VisualEffectMode = .off {
+        didSet {
+            guard isLoaded else { return }
+            saveKey(visualEffectKey, value: visualEffect.rawValue)
+        }
+    }
+
+    /// Interval in seconds between visual effect triggers.
+    var visualEffectInterval: TimeInterval = 60 {
+        didSet {
+            guard isLoaded else { return }
+            UserDefaults.standard.set(visualEffectInterval, forKey: visualEffectIntervalKey)
+        }
+    }
+
     private let key = "com.ledge.themeMode"
     private let bgStyleKey = "com.ledge.widgetBackgroundStyle"
     private let bgModeKey = "com.ledge.dashboardBackgroundMode"
     private let bgImageKey = "com.ledge.backgroundImagePath"
+    private let visualEffectKey = "com.ledge.visualEffect"
+    private let visualEffectIntervalKey = "com.ledge.visualEffectInterval"
 
     /// Guard against didSet firing during init (especially with @Observable)
     private var isLoaded = false
@@ -288,6 +327,21 @@ class ThemeManager {
         }
         if let saved = UserDefaults.standard.string(forKey: bgImageKey), !saved.isEmpty {
             self.backgroundImagePath = saved
+        }
+        // Load visual effect (with migration from old shimmer keys)
+        if let saved = UserDefaults.standard.string(forKey: visualEffectKey),
+           let effect = VisualEffectMode(rawValue: saved) {
+            self.visualEffect = effect
+        } else if UserDefaults.standard.bool(forKey: "com.ledge.shimmerEnabled") {
+            // Migrate old shimmer setting
+            self.visualEffect = .lightWave
+        }
+        let savedInterval = UserDefaults.standard.double(forKey: visualEffectIntervalKey)
+        if savedInterval > 0 {
+            self.visualEffectInterval = savedInterval
+        } else {
+            let oldInterval = UserDefaults.standard.double(forKey: "com.ledge.shimmerInterval")
+            if oldInterval > 0 { self.visualEffectInterval = oldInterval }
         }
         detectSystemAppearance()
         loadBackgroundImage()

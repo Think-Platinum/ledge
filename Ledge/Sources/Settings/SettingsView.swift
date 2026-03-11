@@ -1209,6 +1209,37 @@ struct AppearanceSettingsView: View {
                 }
             }
 
+            Section("Visual Effects") {
+                Picker("Effect", selection: Binding(
+                    get: { themeManager.visualEffect },
+                    set: { themeManager.visualEffect = $0 }
+                )) {
+                    ForEach(VisualEffectMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+
+                if themeManager.visualEffect != .off {
+                    Picker("Interval", selection: Binding(
+                        get: { themeManager.visualEffectInterval },
+                        set: { themeManager.visualEffectInterval = $0 }
+                    )) {
+                        Text("30 seconds").tag(30.0 as TimeInterval)
+                        Text("1 minute").tag(60.0 as TimeInterval)
+                        Text("2 minutes").tag(120.0 as TimeInterval)
+                        Text("5 minutes").tag(300.0 as TimeInterval)
+                    }
+
+                    Text(themeManager.visualEffect.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button("Preview Effect") {
+                        NotificationCenter.default.post(name: .ledgePreviewVisualEffect, object: nil)
+                    }
+                }
+            }
+
             Section("Preview") {
                 ThemePreviewCard(theme: themeManager.resolvedTheme)
                     .frame(height: 120)
@@ -1364,4 +1395,11 @@ struct AboutView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("About")
     }
+}
+
+// MARK: - Notifications
+
+extension Notification.Name {
+    /// Posted by the Settings "Preview Effect" button; DashboardView listens and triggers the active effect.
+    static let ledgePreviewVisualEffect = Notification.Name("ledgePreviewVisualEffect")
 }

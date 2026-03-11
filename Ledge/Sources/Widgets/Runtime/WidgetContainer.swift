@@ -112,9 +112,44 @@ private struct WidgetBackgroundStyleKey: EnvironmentKey {
     static let defaultValue: WidgetBackgroundStyle = .solid
 }
 
+// MARK: - Show Touch Surfaces Environment Key
+
+private struct ShowTouchSurfacesKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
 extension EnvironmentValues {
     var widgetBackgroundStyle: WidgetBackgroundStyle {
         get { self[WidgetBackgroundStyleKey.self] }
         set { self[WidgetBackgroundStyleKey.self] = newValue }
+    }
+
+    var showTouchSurfaces: Bool {
+        get { self[ShowTouchSurfacesKey.self] }
+        set { self[ShowTouchSurfacesKey.self] = newValue }
+    }
+}
+
+// MARK: - Touch Surface Debug Modifier
+
+/// Draws a 1pt red border around the view when touch surface debugging is enabled.
+/// Apply after `.contentShape(Rectangle())` on interactive elements to visualize tap targets.
+struct TouchSurfaceDebugModifier: ViewModifier {
+    @Environment(\.showTouchSurfaces) private var showTouchSurfaces
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if showTouchSurfaces {
+                Rectangle()
+                    .strokeBorder(.red, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+extension View {
+    func debugTouchSurface() -> some View {
+        modifier(TouchSurfaceDebugModifier())
     }
 }

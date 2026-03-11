@@ -8,15 +8,69 @@ import Combine
 /// - **Spotify Web API** — uses OAuth PKCE for cross-device playback state and control.
 ///   Shows which device is playing (phone, speaker, etc.) and can transfer playback.
 ///   Requires a Spotify Client ID from developer.spotify.com.
+/// How album art colours/imagery are used as the widget background.
+enum AlbumArtStyle: String, Codable, CaseIterable {
+    case none         = "None"
+    case edgeFade     = "Edge Fade"
+    case frostedGlass = "Frosted Glass"
+    case vinylAura    = "Vinyl Aura"
+    case colorBands   = "Color Bands"
+
+    var displayName: String { rawValue }
+}
+
 struct SpotifyWidget {
 
     struct Config: Codable, Equatable {
         var showAlbumArt: Bool = true
         var showProgressBar: Bool = true
-        var showAlbumColors: Bool = true
+        var albumArtStyle: AlbumArtStyle = .edgeFade
         var showSkipButtons: Bool = true
         var useWebAPI: Bool = false
         var spotifyClientID: String = ""
+
+        private enum CodingKeys: String, CodingKey {
+            case showAlbumArt, showProgressBar, albumArtStyle, showSkipButtons, useWebAPI, spotifyClientID
+            case legacyShowAlbumColors = "showAlbumColors"
+        }
+
+        init() {}
+
+        init(showAlbumArt: Bool = true, showProgressBar: Bool = true, albumArtStyle: AlbumArtStyle = .edgeFade, showSkipButtons: Bool = true, useWebAPI: Bool = false, spotifyClientID: String = "") {
+            self.showAlbumArt = showAlbumArt
+            self.showProgressBar = showProgressBar
+            self.albumArtStyle = albumArtStyle
+            self.showSkipButtons = showSkipButtons
+            self.useWebAPI = useWebAPI
+            self.spotifyClientID = spotifyClientID
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            showAlbumArt = try container.decodeIfPresent(Bool.self, forKey: .showAlbumArt) ?? true
+            showProgressBar = try container.decodeIfPresent(Bool.self, forKey: .showProgressBar) ?? true
+            showSkipButtons = try container.decodeIfPresent(Bool.self, forKey: .showSkipButtons) ?? true
+            useWebAPI = try container.decodeIfPresent(Bool.self, forKey: .useWebAPI) ?? false
+            spotifyClientID = try container.decodeIfPresent(String.self, forKey: .spotifyClientID) ?? ""
+
+            if let style = try? container.decode(AlbumArtStyle.self, forKey: .albumArtStyle) {
+                albumArtStyle = style
+            } else if let legacy = try? container.decode(Bool.self, forKey: .legacyShowAlbumColors) {
+                albumArtStyle = legacy ? .edgeFade : .none
+            } else {
+                albumArtStyle = .edgeFade
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(showAlbumArt, forKey: .showAlbumArt)
+            try container.encode(showProgressBar, forKey: .showProgressBar)
+            try container.encode(albumArtStyle, forKey: .albumArtStyle)
+            try container.encode(showSkipButtons, forKey: .showSkipButtons)
+            try container.encode(useWebAPI, forKey: .useWebAPI)
+            try container.encode(spotifyClientID, forKey: .spotifyClientID)
+        }
     }
 
     static let descriptor = WidgetDescriptor(
@@ -54,10 +108,13 @@ struct SpotifyWidgetView: View {
     @State private var isSpotifyRunning = false
     @State private var albumColors: AlbumColorExtractor.Colors?
     @State private var lastArtworkURL = ""
-    /// Holds the previous artwork URL for crossfade transitions.
-    @State private var previousArtworkURL = ""
-    /// Controls the crossfade opacity (0 = showing old art, 1 = showing new art).
-    @State private var artworkTransitionProgress: CGFloat = 1.0
+    /// The artwork URL currently displayed — lags behind `state.artworkURL`
+    /// so the old art stays visible during the fade-out phase.
+    @State private var displayedArtworkURL = ""
+    /// Controls album art opacity for fade-out/fade-in transitions.
+    @State private var artworkOpacity: CGFloat = 1.0
+    /// Controls background opacity for coordinated fade-out/fade-in with artwork.
+    @State private var backgroundOpacity: CGFloat = 1.0
     @State private var isSeeking = false
     @State private var seekPosition: Double = 0
     /// Guards against overlapping refresh tasks. If a previous Task.detached
@@ -76,8 +133,9 @@ struct SpotifyWidgetView: View {
     /// Controls visibility of track text for coordinated transitions.
     /// Set to `false` to conceal text, `true` to reveal.
     @State private var textContentVisible = true
-    /// Timestamp when the current track name was first detected (for reveal delay).
-    @State private var trackChangeTime: Date?
+    /// Monotonically-increasing ID for track changes. Used to cancel
+    /// stale reveal callbacks when rapid skips occur.
+    @State private var trackChangeID: Int = 0
 
     private let pollTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let positionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -107,24 +165,6 @@ struct SpotifyWidgetView: View {
             if state.isPlaying && !isSeeking {
                 state.playerPosition += 1
             }
-
-            // Auto-advance: conceal text when within 1.5s of track end
-            if state.isPlaying && textContentVisible
-                && state.trackDuration > 3
-                && state.playerPosition >= state.trackDuration - 1.5 {
-                textContentVisible = false
-            }
-
-            // Reveal text ~1s after a track change was detected
-            if !textContentVisible, let changeTime = trackChangeTime,
-               Date().timeIntervalSince(changeTime) >= 1.0 {
-                textContentVisible = true
-                trackChangeTime = nil
-                // Start art crossfade alongside the text reveal
-                withAnimation(.easeInOut(duration: 0.8)) {
-                    artworkTransitionProgress = 1.0
-                }
-            }
         }
         .onReceive(configStore.configDidChange) { changedID in
             if changedID == instanceID { loadConfig() }
@@ -139,7 +179,8 @@ struct SpotifyWidgetView: View {
 
             ZStack {
                 // Radial album colour glow — radiates from the album art position
-                albumColorGlow(size: geometry.size)
+                albumArtBackground(size: geometry.size)
+                    .opacity(backgroundOpacity)
 
                 if h < 150 {
                     ultraCompactLayout(size: geometry.size)
@@ -150,14 +191,21 @@ struct SpotifyWidgetView: View {
                 }
             }
         }
-        .onChange(of: state.artworkURL) { _, newURL in
+        .onChange(of: state.artworkURL, initial: true) { _, newURL in
+            // `initial: true` ensures this fires when nowPlayingView first appears
+            // with an already-set artworkURL (e.g. Spotify was playing at launch).
+            // Without it, the view transitions from notPlayingView → nowPlayingView
+            // with the URL already populated, and .onChange never fires.
             if !newURL.isEmpty && newURL != lastArtworkURL {
-                previousArtworkURL = lastArtworkURL
+                let isFirstLoad = lastArtworkURL.isEmpty
                 lastArtworkURL = newURL
 
-                // Hold at old art — the crossfade is triggered by the
-                // position timer when text reveal starts (~1s into new track).
-                artworkTransitionProgress = 0.0
+                if isFirstLoad {
+                    // First artwork — show immediately, no transition
+                    displayedArtworkURL = newURL
+                    artworkOpacity = 1.0
+                    backgroundOpacity = 1.0
+                }
 
                 // Pre-extract colours so they're ready when the reveal fires
                 extractColors(from: newURL)
@@ -165,12 +213,30 @@ struct SpotifyWidgetView: View {
         }
         .onChange(of: state.trackName) { oldValue, newValue in
             if oldValue != newValue && !newValue.isEmpty {
-                trackChangeTime = Date()
+                // Increment change ID — cancels any pending reveal from a
+                // previous skip so rapid skips don't reveal stale data.
+                trackChangeID += 1
+                let thisChange = trackChangeID
 
-                // If text is still visible (manual skip — didn't hit end-of-track
-                // detection), conceal now. The reveal timer will fire ~1s later.
-                if textContentVisible {
-                    textContentVisible = false
+                // Conceal: text characters fade/blur out L→R, art + background fade out
+                textContentVisible = false
+                withAnimation(.easeIn(duration: 0.5)) {
+                    artworkOpacity = 0.0
+                    backgroundOpacity = 0.0
+                }
+
+                // After conceal completes (0.8s for char cascade + small gap),
+                // swap art and reveal new text + art + background together.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                    guard trackChangeID == thisChange else { return }
+                    displayedArtworkURL = state.artworkURL
+                    textContentVisible = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        withAnimation(.easeOut(duration: 0.5)) {
+                            artworkOpacity = 1.0
+                            backgroundOpacity = 1.0
+                        }
+                    }
                 }
             }
         }
@@ -214,23 +280,25 @@ struct SpotifyWidgetView: View {
             Spacer(minLength: 4)
 
             // Just basic playback controls — no progress, no volume
-            // Sized for touch targets (min 44pt tap area)
             HStack(spacing: 20) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 18))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
             }
             .foregroundStyle(.white)
@@ -309,37 +377,42 @@ struct SpotifyWidgetView: View {
         HStack(spacing: 0) {
             Spacer()
 
-            // Centered playback controls — sized for touch (min 44pt tap area)
+            // Centered playback controls
             HStack(spacing: 20) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 if config.showSkipButtons {
                     Button { doSkipBackward(10) } label: {
                         Image(systemName: "gobackward.10").font(.system(size: 16))
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minWidth: 48, minHeight: 48)
                             .contentShape(Rectangle())
+                            .debugTouchSurface()
                     }
                 }
                 Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 30))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 if config.showSkipButtons {
                     Button { doSkipForward(10) } label: {
                         Image(systemName: "goforward.10").font(.system(size: 16))
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minWidth: 48, minHeight: 48)
                             .contentShape(Rectangle())
+                            .debugTouchSurface()
                     }
                 }
                 Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 18))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
             }
             .foregroundStyle(.white)
@@ -367,8 +440,9 @@ struct SpotifyWidgetView: View {
                     Image(systemName: "arrow.up.forward.square")
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.35))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 .buttonStyle(.plain)
             }
@@ -387,9 +461,20 @@ struct SpotifyWidgetView: View {
     // │ └──────────┘                                                │
     // └─────────────────────────────────────────────────────────────┘
 
+    /// Volume popover state for collapsible volume control.
+    @State private var showVolumeOverlay = false
+
     @ViewBuilder
     private func fullLayout(size: CGSize) -> some View {
         let artSize = size.height - 24
+        let controlsWidth = size.width - artSize - 12 - 16 // art + leading pad + trailing pad
+        let isExtraLarge = size.height >= 400
+
+        // Scale track info fonts for very large widgets
+        let trackFontSize: CGFloat = isExtraLarge ? min(size.height * 0.08, 44) : 28
+        let artistFontSize: CGFloat = isExtraLarge ? min(size.height * 0.055, 28) : 20
+        let albumFontSize: CGFloat = isExtraLarge ? min(size.height * 0.04, 22) : 16
+        let deviceFontSize: CGFloat = isExtraLarge ? 14 : 12
 
         HStack(spacing: 0) {
             // Album art — full height with padding
@@ -401,28 +486,28 @@ struct SpotifyWidgetView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Spacer()
 
-                // Track info
-                VStack(alignment: .leading, spacing: 3) {
+                // Track info — scales with widget size
+                VStack(alignment: .leading, spacing: isExtraLarge ? 5 : 3) {
                     MarqueeText(
                         text: state.trackName,
-                        font: .system(size: 28, weight: .semibold),
+                        font: .system(size: trackFontSize, weight: .semibold),
                         color: .white,
                         isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.artistName,
-                        font: .system(size: 20),
+                        font: .system(size: artistFontSize),
                         color: .white.opacity(0.75),
                         isContentVisible: textContentVisible
                     )
                     MarqueeText(
                         text: state.albumName,
-                        font: .system(size: 16),
+                        font: .system(size: albumFontSize),
                         color: .white.opacity(0.5),
                         isContentVisible: textContentVisible
                     )
                     if !deviceName.isEmpty {
-                        deviceLabel(fontSize: 12)
+                        deviceLabel(fontSize: deviceFontSize)
                     }
                 }
 
@@ -433,8 +518,8 @@ struct SpotifyWidgetView: View {
                     progressBar(barHeight: 8, timeFont: .system(size: 12, design: .monospaced))
                 }
 
-                // Controls
-                fullControlsRow
+                // Controls — collapsible volume when space is tight
+                fullControlsRow(availableWidth: controlsWidth)
                     .padding(.top, 6)
                     .padding(.bottom, 4)
             }
@@ -492,41 +577,48 @@ struct SpotifyWidgetView: View {
 
     // MARK: - Full Controls
 
-    private var fullControlsRow: some View {
-        HStack(spacing: 0) {
+    private func fullControlsRow(availableWidth: CGFloat = 400) -> some View {
+        let collapseVolume = availableWidth < 130
+
+        return HStack(spacing: 0) {
             Spacer()
 
-            // Centered playback controls — larger touch targets
+            // Centered playback controls
             HStack(spacing: 24) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 22))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 if config.showSkipButtons {
                     Button { doSkipBackward(10) } label: {
                         Image(systemName: "gobackward.10").font(.system(size: 20))
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minWidth: 48, minHeight: 48)
                             .contentShape(Rectangle())
+                            .debugTouchSurface()
                     }
                 }
                 Button { doPlayPause() } label: {
                     Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 36))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 if config.showSkipButtons {
                     Button { doSkipForward(10) } label: {
                         Image(systemName: "goforward.10").font(.system(size: 20))
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minWidth: 48, minHeight: 48)
                             .contentShape(Rectangle())
+                            .debugTouchSurface()
                     }
                 }
                 Button { doNextTrack() } label: {
                     Image(systemName: "forward.fill").font(.system(size: 22))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
             }
             .foregroundStyle(.white)
@@ -534,62 +626,93 @@ struct SpotifyWidgetView: View {
 
             Spacer()
 
-            HStack(spacing: 6) {
-                Image(systemName: volumeIcon)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .frame(width: 14)
-                Slider(
-                    value: Binding(
-                        get: { Double(state.volume) },
-                        set: { state.volume = Int($0); doSetVolume(Int($0)) }
-                    ),
-                    in: 0...100
-                )
-                .frame(width: 70)
-                .tint(.green)
-                .controlSize(.mini)
+            if collapseVolume {
+                // Collapsed: speaker icon → overlay slider
+                Button {
+                    showVolumeOverlay.toggle()
+                } label: {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 16))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(minWidth: 48, minHeight: 48)
+                        .contentShape(Rectangle())
+                        .debugTouchSurface()
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .top) {
+                    if showVolumeOverlay {
+                        VStack(spacing: 4) {
+                            Slider(
+                                value: Binding(
+                                    get: { Double(state.volume) },
+                                    set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                                ),
+                                in: 0...100
+                            )
+                            .frame(width: 100)
+                            .tint(.green)
+                            .controlSize(.mini)
+                            Text("\(state.volume)%")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .padding(8)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .offset(y: -56)
+                    }
+                }
 
                 Button { bridge.activateSpotify() } label: {
                     Image(systemName: "arrow.up.forward.square")
                         .font(.system(size: 14))
                         .foregroundStyle(.white.opacity(0.4))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
+                        .debugTouchSurface()
                 }
                 .buttonStyle(.plain)
+            } else {
+                // Inline volume slider
+                HStack(spacing: 6) {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .frame(width: 14)
+                    Slider(
+                        value: Binding(
+                            get: { Double(state.volume) },
+                            set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                        ),
+                        in: 0...100
+                    )
+                    .frame(width: 70)
+                    .tint(.green)
+                    .controlSize(.mini)
+
+                    Button { bridge.activateSpotify() } label: {
+                        Image(systemName: "arrow.up.forward.square")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white.opacity(0.4))
+                            .frame(minWidth: 48, minHeight: 48)
+                            .contentShape(Rectangle())
+                            .debugTouchSurface()
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
 
-    // MARK: - Album Art (Crossfade)
+    // MARK: - Album Art (Fade Out / Fade In)
 
     @ViewBuilder
     private func albumArtView(size: CGFloat, cornerRadius: CGFloat, placeholderIconSize: CGFloat) -> some View {
-        if config.showAlbumArt, !state.artworkURL.isEmpty {
-            ZStack {
-                // Previous artwork (fading out)
-                if !previousArtworkURL.isEmpty, artworkTransitionProgress < 1.0,
-                   let oldURL = URL(string: previousArtworkURL) {
-                    AsyncImage(url: oldURL) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        Rectangle()
-                            .fill(.white.opacity(0.08))
-                            .overlay(
-                                Image(systemName: "music.note")
-                                    .font(.system(size: placeholderIconSize))
-                                    .foregroundStyle(.white.opacity(0.3))
-                            )
-                    }
-                    .opacity(1.0 - artworkTransitionProgress)
-                }
-
-                // Current artwork (fading in)
-                if let url = URL(string: state.artworkURL) {
+        if config.showAlbumArt, !displayedArtworkURL.isEmpty {
+            Group {
+                if let url = URL(string: displayedArtworkURL) {
                     AsyncImage(url: url) { image in
                         image.resizable().aspectRatio(contentMode: .fill)
-                            .opacity(artworkTransitionProgress)
                     } placeholder: {
                         Rectangle()
                             .fill(.white.opacity(0.08))
@@ -598,74 +721,168 @@ struct SpotifyWidgetView: View {
                                     .font(.system(size: placeholderIconSize))
                                     .foregroundStyle(.white.opacity(0.3))
                             )
-                            .opacity(artworkTransitionProgress)
                     }
                 }
             }
+            .opacity(artworkOpacity)
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
     }
 
-    // MARK: - Album Colour Bleed
+    // MARK: - Album Art Background Styles
 
-    /// Renders album art colour bleed so the art appears to have no edges.
-    ///
-    /// The background directly adjacent to the album art matches the art's
-    /// actual edge pixel colours at full opacity. On the left/top/bottom,
-    /// there's almost no fade (the art fills most of the widget height).
-    /// On the right, the trailing edge colour fades across the text area.
+    /// Dispatches to the selected album art background style.
     @ViewBuilder
-    private func albumColorGlow(size: CGSize) -> some View {
-        // In transparent mode, no background glow — widget is fully clear
+    private func albumArtBackground(size: CGSize) -> some View {
         if backgroundStyle == .transparent {
             EmptyView()
-        } else if config.showAlbumColors, let colors = albumColors {
+        } else {
+            switch config.albumArtStyle {
+            case .none:         EmptyView()
+            case .edgeFade:     edgeFadeBackground(size: size)
+            case .frostedGlass: frostedGlassBackground(size: size)
+            case .vinylAura:    vinylAuraBackground(size: size)
+            case .colorBands:   colorBandsBackground(size: size)
+            }
+        }
+    }
+
+    /// **Edge Fade** — blurred edge colours bleed from the album art rightward.
+    /// At larger widget sizes, the blur radius and spread scale proportionally
+    /// so the colour wash fills the trailing space naturally.
+    @ViewBuilder
+    private func edgeFadeBackground(size: CGSize) -> some View {
+        if let colors = albumColors {
             let artSize = artSizeForHeight(size.height)
             let artPad = artPaddingForHeight(size.height)
-            // Album art right edge as a proportion of the widget width
-            let artRightX = (artPad + artSize) / max(size.width, 1)
+            let artCenterX = artPad + artSize / 2
+            let artCenterY = size.height / 2
+            let trailingSpace = size.width - (artPad + artSize)
+
+            // Scale blur with widget size for smooth coverage on large widgets
+            let baseBlur = max(18, trailingSpace * 0.12)
+            let spreadBlur = max(trailingSpace * 0.35, 40)
 
             ZStack {
-                // Horizontal base: solid edge colors across the art area,
-                // then trailing edge fades across the text/controls area.
-                // At the art's left edge → edgeLeading (full opacity).
-                // At the art's right edge → edgeTrailing (full opacity).
-                // Beyond the art → fades to clear, revealing widget background.
-                LinearGradient(
-                    stops: [
-                        .init(color: colors.edgeLeading, location: 0.0),
-                        .init(color: colors.edgeTrailing, location: artRightX),
-                        .init(color: colors.edgeTrailing.opacity(0.35), location: artRightX + (1 - artRightX) * 0.5),
-                        .init(color: .clear, location: 1.0)
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
+                // Primary gradient from art edges
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [colors.edgeLeading, colors.edgeTrailing],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: artSize + trailingSpace * 0.3, height: artSize)
+                    .position(x: artCenterX + trailingSpace * 0.15, y: artCenterY)
+                    .blur(radius: baseBlur)
 
-                // Top edge: full-opacity strip covering the thin gap above the art.
-                // Fades down quickly since the art fills ~90% of the widget height.
-                LinearGradient(
-                    stops: [
-                        .init(color: colors.edgeTop, location: 0.0),
-                        .init(color: colors.edgeTop.opacity(0.3), location: 0.1),
-                        .init(color: .clear, location: 0.25)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                // Trailing colour wash — extends further on large widgets
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [colors.edgeTrailing, colors.edgeTrailing.opacity(0.3)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: trailingSpace * 0.85, height: artSize * 0.9)
+                    .position(x: artPad + artSize + trailingSpace * 0.4, y: artCenterY)
+                    .blur(radius: spreadBlur)
 
-                // Bottom edge: full-opacity strip covering the thin gap below the art.
-                LinearGradient(
-                    stops: [
-                        .init(color: colors.edgeBottom, location: 0.0),
-                        .init(color: colors.edgeBottom.opacity(0.3), location: 0.1),
-                        .init(color: .clear, location: 0.25)
-                    ],
-                    startPoint: .bottom,
-                    endPoint: .top
-                )
+                // Top/bottom edge tints for vertical bleed
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [colors.edgeTop.opacity(0.4), .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: trailingSpace, height: artSize * 0.5)
+                    .position(x: artPad + artSize + trailingSpace / 2, y: artCenterY * 0.4)
+                    .blur(radius: baseBlur * 0.8)
+
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.clear, colors.edgeBottom.opacity(0.4)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: trailingSpace, height: artSize * 0.5)
+                    .position(x: artPad + artSize + trailingSpace / 2, y: size.height - artCenterY * 0.4)
+                    .blur(radius: baseBlur * 0.8)
             }
+            .clipped()
+        }
+    }
+
+    /// **Frosted Glass** — album art fills the widget, heavily blurred with a dark overlay.
+    @ViewBuilder
+    private func frostedGlassBackground(size: CGSize) -> some View {
+        if !displayedArtworkURL.isEmpty {
+            ZStack {
+                AsyncImage(url: URL(string: displayedArtworkURL)) { phase in
+                    if let image = phase.image {
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: size.width, height: size.height)
+                            .clipped()
+                            .blur(radius: 30)
+                    } else {
+                        Color.clear
+                    }
+                }
+                Color.black.opacity(0.35)
+            }
+        }
+    }
+
+    /// **Vinyl Aura** — concentric radial gradient centred on the album art.
+    @ViewBuilder
+    private func vinylAuraBackground(size: CGSize) -> some View {
+        if let colors = albumColors {
+            let artSize = artSizeForHeight(size.height)
+            let artPad = artPaddingForHeight(size.height)
+            let artCenterX = artPad + artSize / 2
+            let artCenterY = size.height / 2
+
+            RadialGradient(
+                colors: [
+                    colors.edgeLeading.opacity(0.8),
+                    colors.primary.opacity(0.5),
+                    colors.secondary.opacity(0.3),
+                    Color.clear
+                ],
+                center: UnitPoint(
+                    x: artCenterX / size.width,
+                    y: artCenterY / size.height
+                ),
+                startRadius: artSize * 0.3,
+                endRadius: max(size.width, size.height) * 0.85
+            )
+        }
+    }
+
+    /// **Color Bands** — vertical gradient through extracted edge colours.
+    @ViewBuilder
+    private func colorBandsBackground(size: CGSize) -> some View {
+        if let colors = albumColors {
+            LinearGradient(
+                colors: [
+                    colors.edgeTop,
+                    colors.primary,
+                    colors.secondary,
+                    colors.edgeBottom
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .opacity(0.7)
         }
     }
 
@@ -870,8 +1087,14 @@ struct SpotifyWidgetView: View {
         Task.detached {
             let colors = await extractor.extract(from: urlString)
             await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.8)) {
+                if backgroundOpacity < 0.01 {
+                    // Background is transparent mid-transition — apply instantly
+                    // so new colours are ready when the fade-in begins.
                     albumColors = colors
+                } else {
+                    withAnimation(.easeInOut(duration: 0.8)) {
+                        albumColors = colors
+                    }
                 }
             }
         }
@@ -976,13 +1199,23 @@ struct SpotifyWidgetView: View {
     }
 }
 
-// MARK: - Marquee Text (bouncing scroll for overflowing text + wipe transitions)
+// MARK: - Marquee Text (character-by-character transitions + bounce scroll)
+
+/// Phase of the character cascade animation.
+private enum CharTransitionPhase {
+    case idle
+    case concealing
+    case revealing
+}
 
 /// Displays text that gently bounces side-to-side when too wide for its container.
-/// When the text changes, a coordinated wipe transition plays:
-///   1. Current text wipes out left-to-right (conceal sweep, ~0.6s)
-///   2. New text wipes in left-to-right (reveal sweep, ~0.8s)
-///   3. If the new text overflows, gentle bounce scroll begins
+///
+/// On track change the parent toggles `isContentVisible` to coordinate a
+/// character-by-character cascade transition:
+///   1. Old text: each character fades out + blurs, staggered L→R (50% overlap)
+///   2. Text swaps (old text is now invisible)
+///   3. New text: each character fades in + un-blurs, staggered L→R (50% overlap)
+///   4. If the new text overflows, gentle bounce scroll begins
 ///
 /// Uses PhaseAnimator (macOS 14+) to cycle between start and end offsets for scrolling.
 private struct MarqueeText: View {
@@ -996,18 +1229,17 @@ private struct MarqueeText: View {
     @State private var containerWidth: CGFloat = 0
 
     /// The text actually displayed — lags behind `text` so the old string
-    /// is visible during the conceal phase before swapping to the new one.
+    /// stays visible during the conceal cascade before swapping to the new one.
     @State private var displayText: String = ""
-    /// Controls the left-to-right reveal sweep (0 = hidden, 1 = fully visible).
-    @State private var revealProgress: CGFloat = 1.0
-    /// Controls the left-to-right conceal sweep (0 = fully visible, 1 = hidden).
-    @State private var concealProgress: CGFloat = 0.0
+    /// Drives the character cascade (0→1). Each character computes its
+    /// individual opacity/blur from this plus its index.
+    @State private var transitionProgress: CGFloat = 0.0
+    /// Current phase of the character transition.
+    @State private var phase: CharTransitionPhase = .idle
     /// Incremented on each text change to re-trigger the PhaseAnimator scroll.
     @State private var scrollTrigger: Int = 0
 
     /// Only scroll if the text overflows by more than 10pt.
-    /// Prevents unnecessary scrolling for tiny measurement differences
-    /// during layout transitions.
     private var overflow: CGFloat { max(textWidth - containerWidth - 10, 0) }
 
     var body: some View {
@@ -1024,46 +1256,53 @@ private struct MarqueeText: View {
                 }
             }
             .overlay(alignment: .leading) {
-                if overflow > 0 {
+                if overflow > 0 && phase == .idle {
                     let scrollDuration = max(Double(overflow) / 30.0, 1.0)
 
                     PhaseAnimator([false, true], trigger: scrollTrigger) { scrolled in
-                        innerText
+                        characterStack
                             .offset(x: scrolled ? -overflow : 0)
-                    } animation: { phase in
-                        phase
+                    } animation: { p in
+                        p
                             ? .linear(duration: scrollDuration).delay(2.0)
                             : .linear(duration: scrollDuration * 0.75).delay(1.5)
                     }
                     .clipped()
                 } else {
-                    innerText
+                    characterStack
+                        .clipped()
                 }
             }
-            .onChange(of: isContentVisible) { wasVisible, nowVisible in
+            .onChange(of: isContentVisible) { _, nowVisible in
                 if !nowVisible {
-                    // Conceal: wipe out L→R (0.6s)
-                    concealProgress = 0.0
-                    withAnimation(.easeIn(duration: 0.6)) {
-                        concealProgress = 1.0
+                    // Conceal: characters fade out + blur, staggered L→R
+                    phase = .concealing
+                    transitionProgress = 0.0
+                    withAnimation(.easeIn(duration: 0.8)) {
+                        transitionProgress = 1.0
                     }
                 } else {
-                    // Reveal: swap to new text, wipe in L→R (0.8s)
+                    // Swap to new text, then reveal: characters fade in + un-blur
                     displayText = text
-                    concealProgress = 0.0
-                    revealProgress = 0.0
-                    withAnimation(.easeOut(duration: 0.8)) {
-                        revealProgress = 1.0
+                    phase = .revealing
+                    transitionProgress = 0.0
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        withAnimation(.easeOut(duration: 1.0)) {
+                            transitionProgress = 1.0
+                        }
                     }
-                    // Restart bounce scroll after reveal completes
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+                    // After reveal completes, enter idle and start bounce scroll
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                        phase = .idle
                         scrollTrigger += 1
                     }
                 }
             }
             .onChange(of: text) { _, newValue in
-                // If text changes while visible (e.g. first load), update immediately
-                if isContentVisible {
+                // Only update immediately on first load (displayText empty).
+                // During track changes the old text stays visible through the
+                // conceal cascade — displayText is swapped in the reveal phase.
+                if displayText.isEmpty && isContentVisible {
                     displayText = newValue
                     scrollTrigger += 1
                 }
@@ -1073,79 +1312,66 @@ private struct MarqueeText: View {
             }
     }
 
-    private var innerText: some View {
-        Text(displayText)
-            .font(font)
-            .foregroundStyle(color)
-            .fixedSize(horizontal: true, vertical: false)
-            .mask(activeMask)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { textWidth = geo.size.width }
-                        .onChange(of: geo.size.width) { _, w in textWidth = w }
-                }
-            )
+    // MARK: - Character Stack
+
+    private var characterStack: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(displayText.enumerated()), id: \.offset) { index, char in
+                Text(String(char))
+                    .font(font)
+                    .foregroundStyle(color)
+                    .opacity(charOpacity(at: index))
+                    .blur(radius: charBlur(at: index))
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { textWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, w in textWidth = w }
+            }
+        )
     }
 
-    /// Selects the appropriate mask based on the current transition phase.
-    @ViewBuilder
-    private var activeMask: some View {
-        if concealProgress > 0 && concealProgress < 1.0 {
-            concealMask
-        } else if revealProgress < 1.0 {
-            revealMask
-        } else {
-            Rectangle()
+    // MARK: - Per-Character Animation
+
+    private func charOpacity(at index: Int) -> CGFloat {
+        switch phase {
+        case .idle:
+            return 1.0
+        case .concealing:
+            return 1.0 - cascadeProgress(at: index, total: displayText.count)
+        case .revealing:
+            return cascadeProgress(at: index, total: displayText.count)
         }
     }
 
-    /// A gradient mask that sweeps left-to-right to reveal text.
-    /// When revealProgress is 1.0, the mask is fully opaque (no effect).
-    /// When animating from 0 → 1, it creates a soft "wipe" that gives
-    /// the appearance of characters fading in from left to right.
-    @ViewBuilder
-    private var revealMask: some View {
-        GeometryReader { geo in
-            let sweepWidth = geo.size.width + 40  // extra for soft edge
-            let offset = -sweepWidth + (sweepWidth + geo.size.width) * revealProgress
-
-            LinearGradient(
-                stops: [
-                    .init(color: .white, location: 0),
-                    .init(color: .white, location: 0.7),
-                    .init(color: .clear, location: 1.0)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: sweepWidth)
-            .offset(x: offset)
+    private func charBlur(at index: Int) -> CGFloat {
+        let maxBlur: CGFloat = 4
+        switch phase {
+        case .idle:
+            return 0
+        case .concealing:
+            return cascadeProgress(at: index, total: displayText.count) * maxBlur
+        case .revealing:
+            return (1.0 - cascadeProgress(at: index, total: displayText.count)) * maxBlur
         }
     }
 
-    /// A gradient mask that sweeps left-to-right to conceal text.
-    /// When concealProgress is 0.0, the mask is fully opaque (text visible).
-    /// When animating from 0 → 1, it clears text from the left edge first,
-    /// creating a "scrubbing away" effect.
-    @ViewBuilder
-    private var concealMask: some View {
-        GeometryReader { geo in
-            let sweepWidth = geo.size.width + 40
-            // The clear region grows from the left as concealProgress increases
-            let clearEnd = (geo.size.width + sweepWidth) * concealProgress - sweepWidth
-
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .clear, location: max(0, (clearEnd / geo.size.width))),
-                    .init(color: .white, location: min(1.0, (clearEnd / geo.size.width) + 0.1)),
-                    .init(color: .white, location: 1.0)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        }
+    /// Returns 0→1 for a specific character as overall `transitionProgress` goes 0→1.
+    /// Characters are staggered left-to-right with 50% overlap between consecutive
+    /// character timings — each character's fade window starts halfway through
+    /// the previous character's window.
+    private func cascadeProgress(at index: Int, total: Int) -> CGFloat {
+        guard total > 1 else { return min(max(transitionProgress, 0), 1) }
+        let n = CGFloat(total)
+        // With 50% overlap: window = 2/(N+1), start(i) = i/(N+1)
+        let start = CGFloat(index) / (n + 1.0)
+        let end = CGFloat(index + 2) / (n + 1.0)
+        if transitionProgress <= start { return 0 }
+        if transitionProgress >= end { return 1 }
+        return (transitionProgress - start) / (end - start)
     }
 }
 
@@ -1168,7 +1394,11 @@ struct SpotifySettingsView: View {
             Section("Display") {
                 Toggle("Show album art", isOn: $config.showAlbumArt)
                 Toggle("Show progress bar", isOn: $config.showProgressBar)
-                Toggle("Album art color background", isOn: $config.showAlbumColors)
+                Picker("Background style", selection: $config.albumArtStyle) {
+                    ForEach(AlbumArtStyle.allCases, id: \.self) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
                 Toggle("Show skip 10s buttons", isOn: $config.showSkipButtons)
             }
 

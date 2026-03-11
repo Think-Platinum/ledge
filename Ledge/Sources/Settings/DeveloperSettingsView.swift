@@ -24,6 +24,7 @@ struct DeveloperSettingsView: View {
         Form {
             permissionsSection
             touchPipelineSection
+            debugVisualsSection
             appStateSection
             logsSection
         }
@@ -175,6 +176,17 @@ struct DeveloperSettingsView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(displayManager.touchWatchdog.disableCount > 0 ? .orange : .primary)
             }
+        }
+    }
+
+    // MARK: - Debug Visuals
+
+    private var debugVisualsSection: some View {
+        Section("Debug Visuals") {
+            Toggle("Show Touch Surfaces", isOn: $displayManager.showTouchSurfaces)
+            Text("Draws a red border around interactive touch targets on the dashboard.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

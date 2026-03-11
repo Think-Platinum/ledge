@@ -89,6 +89,9 @@ class DisplayManager: ObservableObject {
         }
     }
 
+    /// Whether to show debug borders around interactive touch surfaces.
+    @Published var showTouchSurfaces: Bool = false
+
     /// Whether Accessibility permissions have been granted (required for CGEventTap).
     @Published private(set) var accessibilityPermission: AccessibilityPermission = .unknown
 
@@ -311,6 +314,16 @@ class DisplayManager: ObservableObject {
                 NSApp.deactivate()
             }
         }
+    }
+
+    /// Lightweight panel re-assertion — restores window level and ordering
+    /// without rebuilding the fullscreen helper. Safe to call after activation
+    /// policy changes because it avoids `toggleFullScreen` which can trigger
+    /// macOS window management on the main display.
+    func reassertPanelPosition(on screen: NSScreen) {
+        panel?.level = .screenSaver
+        panel?.setFrame(screen.frame, display: true, animate: false)
+        panel?.orderFrontRegardless()
     }
 
     /// Re-assert the fullscreen helper and panel positioning after an event
@@ -693,11 +706,14 @@ class DisplayManager: ObservableObject {
         // Start the mouse guard if enabled and device IDs are known
         updateMouseGuardState()
 
-        // Attempt to start the HID touch reader for direct digitizer access.
-        // If it succeeds, TouchRemapper switches to suppression-only mode.
-        // If it fails, CGEventTap continues handling everything (fallback).
+        // HID Touch Reader is DISABLED by default. It requires Input Monitoring
+        // permission (separate from Accessibility) and the callback never fires
+        // without it. When it fails, suppressionOnly mode causes a touch deadlock
+        // for 5 seconds until the fallback kicks in. CGEventTap remapping works
+        // reliably, so we skip HID entirely until Input Monitoring is confirmed.
+        // TODO: Re-enable when Input Monitoring permission flow is implemented.
         if touchRemapper.isActive {
-            startHIDTouchReader(screen: screen)
+            // startHIDTouchReader(screen: screen)
 
             if calibrationState == .autoDetected {
                 logger.info("Event tap active — touchscreen auto-detected, ready for input")
@@ -792,6 +808,22 @@ class DisplayManager: ObservableObject {
         }
 
         logger.info("HID Touch Reader active — TouchRemapper in suppression-only mode")
+
+        // Fallback: if HID reader hasn't received ANY reports after 5 seconds,
+        // it's not working (callback registered but never fires). Revert to
+        // CGEventTap remapping so touch isn't completely dead.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self,
+                  self.isHIDTouchReaderActive,
+                  self.hidTouchReader.totalReportCount == 0 else { return }
+
+            self.logger.warning("⚠ HID Touch Reader received 0 reports after 5s — falling back to CGEventTap remapping")
+            self.touchRemapper.suppressionOnly = false
+            self.isHIDTouchReaderActive = false
+            self.touchPipelineMode = .cgEventTapOnly
+            self.touchWatchdog.isHIDReaderActive = false
+            self.hidTouchReader.stop()
+        }
     }
 
     /// Start polling for Accessibility permission grant (timer + app activation observer).

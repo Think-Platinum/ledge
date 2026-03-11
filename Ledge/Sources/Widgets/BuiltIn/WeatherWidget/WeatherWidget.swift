@@ -63,7 +63,7 @@ struct WeatherWidgetView: View {
                 if isCompact {
                     compactView(weather: weather)
                 } else {
-                    fullView(weather: weather, width: geometry.size.width)
+                    fullView(weather: weather, width: geometry.size.width, height: geometry.size.height)
                 }
             } else {
                 loadingView
@@ -116,9 +116,14 @@ struct WeatherWidgetView: View {
 
     // MARK: - Full (2+ rows)
 
-    private func fullView(weather: OpenMeteoClient.WeatherData, width: CGFloat) -> some View {
+    private func fullView(weather: OpenMeteoClient.WeatherData, width: CGFloat, height: CGFloat = 300) -> some View {
         VStack(spacing: 10) {
-            Spacer()
+            // Tight top spacing at 2-row height, flexible at larger sizes
+            if height <= 250 {
+                Spacer().frame(height: 4)
+            } else {
+                Spacer()
+            }
 
             // Current conditions + details
             HStack(spacing: 16) {
@@ -158,7 +163,8 @@ struct WeatherWidgetView: View {
                 Divider().background(theme.primaryText.opacity(0.1))
                     .padding(.horizontal, 16)
 
-                let maxDays = max(1, Int(width / 50))
+                let rawMaxDays = max(1, Int(width / 50))
+                let maxDays = width < 400 ? min(rawMaxDays, 5) : rawMaxDays
                 let daysToShow = min(weather.dailyForecast.count, maxDays)
 
                 HStack(spacing: 0) {

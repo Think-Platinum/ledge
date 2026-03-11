@@ -29,7 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// System tray status item.
     private var statusItem: NSStatusItem?
 
-    /// Observer for settings window visibility changes.
+    /// Observers for settings window pinning.
     private var windowObservers: [Any] = []
 
     // MARK: - App Lifecycle
@@ -96,9 +96,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             logger.warning("Xeneon Edge not found on launch — panel not shown")
         }
 
-        // Start as .accessory (hidden from Dock/CMD+TAB) then observe window changes.
-        // IMPORTANT: Do NOT call NSApp.activate() here — it steals focus from the
-        // foreground app. The panel uses .nonactivatingPanel precisely to avoid this.
+        // Stay as .accessory permanently (hidden from Dock/CMD+TAB). The menu bar
+        // icon provides access to settings. We never toggle to .regular because
+        // switching back to .accessory destabilises the Edge panel and causes
+        // macOS to maximize the frontmost main-display window.
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
             self.observeSettingsWindow()
@@ -140,28 +141,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings() {
-        // Show in Dock and CMD+TAB while settings is open
-        NSApp.setActivationPolicy(.regular)
+        // Activate the app so the settings window can come to front.
+        // We stay as .accessory — the window won't appear in Dock/CMD+TAB
+        // but the menu bar icon provides access. This avoids all the
+        // side-effects of toggling activation policy (.regular → .accessory)
+        // which destabilised the Edge panel and maximised main display windows.
         NSApp.activate(ignoringOtherApps: true)
 
         if let window = findSettingsWindow() {
-            // Prevent SwiftUI from releasing the window when it's closed —
-            // otherwise it won't be in NSApp.windows next time we look.
             window.isReleasedWhenClosed = false
             window.makeKeyAndOrderFront(nil)
         } else {
-            // Window may not exist yet (SwiftUI released it after close, or
-            // activation hasn't finished). Retry after a short delay to give
-            // the SwiftUI Window scene time to create/register it.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 if let window = self?.findSettingsWindow() {
                     window.isReleasedWhenClosed = false
                     window.makeKeyAndOrderFront(nil)
                 } else {
-                    self?.logger.warning("Settings window not found — attempting scene open")
-                    // As a last resort, toggle activation to nudge SwiftUI into
-                    // re-creating the Window scene, then try once more.
-                    NSApp.setActivationPolicy(.regular)
+                    self?.logger.warning("Settings window not found — retrying")
                     NSApp.activate(ignoringOtherApps: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                         if let window = self?.findSettingsWindow() {
@@ -187,10 +183,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Settings Window Observation
 
-    /// Watch for the settings window being closed so we can hide from CMD+TAB.
+    /// Pin settings windows so SwiftUI doesn't release them on close.
+    /// Since we stay as .accessory permanently, we no longer toggle
+    /// activation policy on close — eliminating the side-effects.
     private func observeSettingsWindow() {
-        // Pin the settings window the moment it appears so SwiftUI won't
-        // release it when closed — this ensures showSettings() can always find it.
+        // Pin any settings window that SwiftUI already created.
+        for window in NSApp.windows {
+            if window.styleMask.contains(.titled)
+                && !(window is LedgePanel)
+                && !(window is FullscreenHelperWindow) {
+                window.isReleasedWhenClosed = false
+                logger.debug("Existing settings window pinned on observer setup")
+            }
+        }
+
+        // Pin settings windows the moment they appear so showSettings() can always find them.
         let appearObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -205,68 +212,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         windowObservers.append(appearObserver)
-
-        // Observe any window closing — check if it was the settings window
-        let closeObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let window = notification.object as? NSWindow,
-                  window.styleMask.contains(.titled),
-                  !(window is LedgePanel),
-                  !(window is FullscreenHelperWindow) else { return }
-            self?.logger.info("Settings window closed — hiding from CMD+TAB")
-            // Delay slightly to let the window fully close
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self?.updateActivationPolicy()
-            }
-        }
-        windowObservers.append(closeObserver)
-
-        // Also observe window ordering out (minimize, etc.)
-        let orderOutObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMiniaturizeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let window = notification.object as? NSWindow,
-                  window.styleMask.contains(.titled),
-                  !(window is LedgePanel),
-                  !(window is FullscreenHelperWindow) else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self?.updateActivationPolicy()
-            }
-        }
-        windowObservers.append(orderOutObserver)
-    }
-
-    /// Check if any settings windows are visible and update the activation policy accordingly.
-    private func updateActivationPolicy() {
-        let hasVisibleSettingsWindow = NSApp.windows.contains { window in
-            window.styleMask.contains(.titled)
-            && !(window is LedgePanel)
-            && !(window is FullscreenHelperWindow)
-            && window.isVisible
-            && !window.isMiniaturized
-        }
-
-        if hasVisibleSettingsWindow {
-            NSApp.setActivationPolicy(.regular)
-        } else {
-            NSApp.setActivationPolicy(.accessory)
-
-            // The activation policy switch from .regular → .accessory can
-            // destabilize the fullscreen helper's Space on the Edge display,
-            // causing the panel to drop out of fullscreen and the menu bar to
-            // reappear. Re-assert the fullscreen state after a short delay to
-            // let the policy change propagate through the window server.
-            if displayManager.isActive, let screen = displayManager.xeneonScreen {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    self?.displayManager.reassertFullscreen(on: screen)
-                }
-            }
-        }
     }
 
     @objc private func togglePanel() {

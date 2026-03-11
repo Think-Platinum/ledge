@@ -28,6 +28,10 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
         /// Average luminance of the raw (undarkened) primary colour (0–1).
         /// Used by the widget to decide adaptive text colour for contrast.
         let primaryLuminance: Double
+
+        /// Overall average colour of all sampled pixels (undarkened).
+        /// Used by Frosted Glass style as a tint overlay.
+        let averageColor: Color
     }
 
     /// Thread-safe cache of extracted colors keyed by artwork URL.
@@ -80,6 +84,7 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
 
         // Collect color buckets using simple quantization
         var buckets: [Int: (r: Double, g: Double, b: Double, count: Int)] = [:]
+        var totalR = 0.0, totalG = 0.0, totalB = 0.0
 
         for y in 0..<sampleSize {
             for x in 0..<sampleSize {
@@ -87,6 +92,8 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
                 let r = Double(pixelData[offset]) / 255.0
                 let g = Double(pixelData[offset + 1]) / 255.0
                 let b = Double(pixelData[offset + 2]) / 255.0
+
+                totalR += r; totalG += g; totalB += b
 
                 // Quantize to 4-bit per channel for bucketing
                 let key = (Int(r * 15) << 8) | (Int(g * 15) << 4) | Int(b * 15)
@@ -101,6 +108,9 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
                 }
             }
         }
+
+        let pixelCount = Double(sampleSize * sampleSize)
+        let avgColor = Color(red: totalR / pixelCount, green: totalG / pixelCount, blue: totalB / pixelCount)
 
         // Sort buckets by count (most common first), skip very dark/bright
         let sorted = buckets.values
@@ -149,7 +159,8 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
             edgeBottom: edgeBottom,
             edgeLeading: edgeLeading,
             edgeTrailing: edgeTrailing,
-            primaryLuminance: brightness
+            primaryLuminance: brightness,
+            averageColor: avgColor
         )
     }
 
@@ -197,6 +208,7 @@ extension AlbumColorExtractor.Colors {
         edgeBottom: Color(white: 0.2),
         edgeLeading: Color(white: 0.2),
         edgeTrailing: Color(white: 0.2),
-        primaryLuminance: 0.15
+        primaryLuminance: 0.15,
+        averageColor: Color(white: 0.2)
     )
 }
