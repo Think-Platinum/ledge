@@ -200,7 +200,7 @@ nonisolated class AlbumColorExtractor: @unchecked Sendable {
 
 extension AlbumColorExtractor.Colors {
     /// Fallback colours when image analysis fails.
-    static let fallback = AlbumColorExtractor.Colors(
+    nonisolated static let fallback = AlbumColorExtractor.Colors(
         primary: Color(white: 0.15),
         secondary: Color(white: 0.1),
         isDark: true,

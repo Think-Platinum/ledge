@@ -290,7 +290,7 @@ struct DeveloperSettingsView: View {
                     VStack(alignment: .trailing) {
                         Text(panel.isVisible ? "Visible" : "Hidden")
                             .font(.caption.monospaced())
-                        Text("key=\(panel.isKeyWindow) level=\(Int(panel.level.rawValue))")
+                        Text(verbatim: "key=\(panel.isKeyWindow) level=\(Int(panel.level.rawValue))")
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                     }

@@ -26,8 +26,11 @@ import os.log
 /// preventing cursor movement on the primary display.
 ///
 /// This class is `nonisolated` because IOHIDManager callbacks run on the
-/// dedicated HID thread and cannot be confined to MainActor.
-nonisolated class HIDTouchReader {
+/// dedicated HID thread and cannot be confined to MainActor. It is
+/// `@unchecked Sendable` because the dedicated HID thread and the main
+/// thread (panel delivery) each have clearly scoped access patterns —
+/// the mutable state is touched only from the HID thread.
+nonisolated class HIDTouchReader: @unchecked Sendable {
 
     let logger = Logger(subsystem: "com.ledge.app", category: "HIDTouchReader")
 

@@ -3,7 +3,7 @@ import Foundation
 /// A single touch contact point from the Xeneon Edge digitizer.
 ///
 /// Parsed from raw HID reports. Supports up to 5 simultaneous contacts.
-struct TouchContact: Sendable {
+nonisolated struct TouchContact: Sendable {
     /// Contact slot index (0-4) within the report.
     let slot: Int
 

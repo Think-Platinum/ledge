@@ -105,10 +105,10 @@ struct DateTimeWidgetView: View {
         let height = size.height
         let width = size.width
 
-        // Determine size category based on height
+        // Determine size category based on height.
+        // Large (>= 250) is implicit — the else branch below handles it.
         let isCompact = height < 150      // Small widgets (2 rows)
         let isMedium = height < 250       // Medium widgets (3-4 rows)
-        let isLarge = height >= 250       // Large widgets (5-6 rows)
 
         // Primary time font size scales with width
         let timeFontSize: CGFloat
