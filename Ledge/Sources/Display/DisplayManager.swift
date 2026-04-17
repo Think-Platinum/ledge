@@ -164,6 +164,34 @@ class DisplayManager: ObservableObject {
     /// Whether the panel is currently blanked due to screen lock, sleep, or screensaver.
     @Published private(set) var isDisplayBlanked: Bool = false
 
+    /// Reason for the most recent `blankDisplay(reason:)` call.
+    @Published private(set) var lastBlankReason: String?
+
+    /// Timestamp of the most recent `blankDisplay(reason:)` call.
+    @Published private(set) var lastBlankTimestamp: Date?
+
+    /// Reason for the most recent `unblankDisplay(reason:)` call.
+    @Published private(set) var lastUnblankReason: String?
+
+    /// Timestamp of the most recent `unblankDisplay(reason:)` call.
+    @Published private(set) var lastUnblankTimestamp: Date?
+
+    /// Running counts of every sleep/lock/screensaver system event observed.
+    /// Exposed in Developer Settings so stuck-blank recurrences are diagnosable
+    /// without attaching a debugger.
+    struct SecurityEventCounts: Equatable {
+        var screensDidSleep: Int = 0
+        var screensDidWake: Int = 0
+        var willSleep: Int = 0
+        var didWake: Int = 0
+        var screenLocked: Int = 0
+        var screenUnlocked: Int = 0
+        var screensaverStart: Int = 0
+        var screensaverStop: Int = 0
+    }
+
+    @Published private(set) var securityEventCounts = SecurityEventCounts()
+
     // MARK: - Private
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "DisplayManager")
@@ -259,6 +287,10 @@ class DisplayManager: ObservableObject {
             return
         }
 
+        // Intentional reveal — clear any stuck blanking state. If the system is
+        // still locked, `screenIsLocked` has already re-blanked (or will).
+        unblankDisplay(reason: "panel shown")
+
         if panel == nil {
             panel = LedgePanel(on: screen)
             touchRemapper.panel = panel
@@ -294,6 +326,10 @@ class DisplayManager: ObservableObject {
     /// Actually make the panel visible. Called directly (no fullscreen helper needed)
     /// or after the fullscreen helper finishes its transition.
     private func revealPanel(on screen: NSScreen) {
+        // The panel is about to be made visible — ensure its contentView isn't
+        // still hidden from an earlier blank that never unblanked cleanly.
+        unblankDisplay(reason: "panel revealed")
+
         // Ensure panel is positioned correctly on the target screen
         panel?.setFrame(screen.frame, display: true, animate: false)
 
@@ -407,6 +443,9 @@ class DisplayManager: ObservableObject {
             if currentScreen != previousScreen {
                 // Screen changed (e.g., rearranged) — reposition panel AND update touch remapper
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
+                // Display topology changed — clear any stuck blanking so the
+                // rebuilt panel renders widgets instead of a black rectangle.
+                unblankDisplay(reason: "display topology changed")
                 panel?.reposition(on: currentScreen)
                 touchRemapper.updateTargetScreen(currentScreen)
                 hidTouchReader.updatePanelFrame(currentScreen.frame)
@@ -1148,49 +1187,77 @@ class DisplayManager: ObservableObject {
         // Display sleep/wake
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.blankDisplay(reason: "displays slept") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screensDidSleep += 1
+                    self?.blankDisplay(reason: "displays slept")
+                }
             }
         )
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "displays woke") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screensDidWake += 1
+                    self?.unblankDisplay(reason: "displays woke")
+                }
             }
         )
 
         // System sleep/wake (covers lid close, sleep menu, idle sleep)
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.blankDisplay(reason: "system sleeping") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.willSleep += 1
+                    self?.blankDisplay(reason: "system sleeping")
+                }
             }
         )
         securityObservers.append(
-            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
-                // Don't unblank on wake — wait for unlock. If no lock screen is configured,
-                // screensDidWake will handle it.
+            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                // Unblank unconditionally on wake. Lock-screen info-leak protection is
+                // re-asserted by the separate `screenIsLocked` observer if the user
+                // configured a password lock — so removing the "wait for unlock" gate
+                // here does not weaken security but does prevent the stuck-blank
+                // state when `screensDidWake` / `screenIsUnlocked` miss.
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.didWake += 1
+                    self?.unblankDisplay(reason: "system woke")
+                }
             }
         )
 
         // Screen lock/unlock (requires login to dismiss)
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.blankDisplay(reason: "screen locked") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screenLocked += 1
+                    self?.blankDisplay(reason: "screen locked")
+                }
             }
         )
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "screen unlocked") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screenUnlocked += 1
+                    self?.unblankDisplay(reason: "screen unlocked")
+                }
             }
         )
 
         // Screensaver start/stop
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didStart"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.blankDisplay(reason: "screensaver started") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screensaverStart += 1
+                    self?.blankDisplay(reason: "screensaver started")
+                }
             }
         )
         securityObservers.append(
             dc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didStop"), object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.unblankDisplay(reason: "screensaver stopped") }
+                Task { @MainActor [weak self] in
+                    self?.securityEventCounts.screensaverStop += 1
+                    self?.unblankDisplay(reason: "screensaver stopped")
+                }
             }
         )
 
@@ -1198,19 +1265,35 @@ class DisplayManager: ObservableObject {
     }
 
     /// Hide panel content — shows black to prevent information leakage.
-    private func blankDisplay(reason: String) {
+    func blankDisplay(reason: String) {
+        lastBlankReason = reason
+        lastBlankTimestamp = Date()
         guard !isDisplayBlanked else { return }
         isDisplayBlanked = true
         panel?.contentView?.isHidden = true
         logger.info("Display blanked: \(reason)")
     }
 
-    /// Restore panel content after the system is unlocked/awake.
-    private func unblankDisplay(reason: String) {
-        guard isDisplayBlanked else { return }
+    /// Restore panel content. Safe to call from any recovery path (user toggle,
+    /// display-topology change, wake). Always resets `contentView.isHidden` so
+    /// a stuck-blank panel recovers even if internal state was already `false`.
+    func unblankDisplay(reason: String) {
+        lastUnblankReason = reason
+        lastUnblankTimestamp = Date()
+        let wasBlanked = isDisplayBlanked
         isDisplayBlanked = false
         panel?.contentView?.isHidden = false
-        logger.info("Display unblanked: \(reason)")
+        if wasBlanked {
+            logger.info("Display unblanked: \(reason)")
+        }
+    }
+
+    /// Debug / recovery action — force the panel content visible and reset
+    /// blanking state. Exposed via Developer Settings so a stuck panel can be
+    /// recovered without restarting Ledge.
+    func forceUnblank() {
+        logger.info("Force unblank requested from Settings")
+        unblankDisplay(reason: "force unblank (Settings)")
     }
 
     // MARK: - Detection Helpers

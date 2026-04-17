@@ -24,6 +24,7 @@ struct DeveloperSettingsView: View {
         Form {
             permissionsSection
             touchPipelineSection
+            displaySecuritySection
             debugVisualsSection
             appStateSection
             logsSection
@@ -179,6 +180,80 @@ struct DeveloperSettingsView: View {
         }
     }
 
+    // MARK: - Display Security
+
+    private var displaySecuritySection: some View {
+        let counts = displayManager.securityEventCounts
+
+        return Section("Display Security") {
+            LabeledContent("Blanked") {
+                HStack {
+                    statusDot(!displayManager.isDisplayBlanked)
+                    Text(displayManager.isDisplayBlanked ? "Yes" : "No")
+                        .font(.caption.monospaced())
+                }
+            }
+
+            if let reason = displayManager.lastBlankReason {
+                LabeledContent("Last Blank") {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(reason)
+                            .font(.caption.monospaced())
+                        if let ts = displayManager.lastBlankTimestamp {
+                            Text(formatTimestamp(ts))
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if let reason = displayManager.lastUnblankReason {
+                LabeledContent("Last Unblank") {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(reason)
+                            .font(.caption.monospaced())
+                        if let ts = displayManager.lastUnblankTimestamp {
+                            Text(formatTimestamp(ts))
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            eventCountRow(label: "screensDidSleep", value: counts.screensDidSleep)
+            eventCountRow(label: "screensDidWake", value: counts.screensDidWake)
+            eventCountRow(label: "willSleep", value: counts.willSleep)
+            eventCountRow(label: "didWake", value: counts.didWake)
+            eventCountRow(label: "screenIsLocked", value: counts.screenLocked)
+            eventCountRow(label: "screenIsUnlocked", value: counts.screenUnlocked)
+            eventCountRow(label: "screensaver.didStart", value: counts.screensaverStart)
+            eventCountRow(label: "screensaver.didStop", value: counts.screensaverStop)
+
+            Button("Force Unblank") {
+                displayManager.forceUnblank()
+            }
+            .help("Clears the blanking state and shows the panel content. Use if the panel is stuck black after sleep/wake or display reconfiguration.")
+
+            Text("Counts each observed system event since app launch. If the panel sticks black, these reveal which notification sequence is missing — e.g. a wake without a matching screensDidWake or screenIsUnlocked.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func eventCountRow(label: String, value: Int) -> some View {
+        LabeledContent(label) {
+            Text("\(value)")
+                .font(.caption.monospaced())
+                .foregroundStyle(value > 0 ? .primary : .secondary)
+        }
+    }
+
+    private func formatTimestamp(_ date: Date) -> String {
+        date.formatted(.dateTime.hour().minute().second().secondFraction(.fractional(3)))
+    }
+
     // MARK: - Debug Visuals
 
     private var debugVisualsSection: some View {
@@ -224,12 +299,6 @@ struct DeveloperSettingsView: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }
-            }
-
-            LabeledContent("Display Blanked") {
-                statusDot(!displayManager.isDisplayBlanked)
-                Text(displayManager.isDisplayBlanked ? "Yes" : "No")
-                    .font(.caption.monospaced())
             }
 
             LabeledContent("Mouse Guard") {

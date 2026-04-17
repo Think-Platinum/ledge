@@ -218,6 +218,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if displayManager.isActive {
             displayManager.hidePanel()
         } else {
+            // Ensure any stuck blanking state is cleared before reshowing —
+            // otherwise the menu toggle re-orders a panel whose content is
+            // still hidden and the user sees a black rectangle.
+            displayManager.unblankDisplay(reason: "user toggle")
             displayManager.showPanel()
         }
     }
