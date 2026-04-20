@@ -30,10 +30,17 @@ cd "$REPO_ROOT"
 # ---------------------------------------------------------------------------
 # 1. Verify signing identity exists
 # ---------------------------------------------------------------------------
+#
+# We check by certificate name, not codesigning-policy match. The
+# `-p codesigning` filter requires the cert's Extended Key Usage (EKU)
+# extension to include `codeSigning`, which Keychain Access's "Self Signed
+# Root" wizard doesn't always set even when you pick "Code Signing" as
+# cert type. Presence + private key is enough — if the cert isn't
+# actually usable for signing, xcodebuild will fail with a clear error.
 
-if ! security find-identity -v -p codesigning | grep -qF "\"$SIGN_IDENTITY\""; then
+if ! security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
     cat <<EOF >&2
-error: code-signing identity "$SIGN_IDENTITY" not found.
+error: certificate "$SIGN_IDENTITY" not found in any keychain.
 
 To preserve Accessibility permission across rebuilds, Ledge needs to
 be signed by a stable identity instead of ad-hoc. Create one once:
@@ -54,6 +61,18 @@ EOF
     exit 1
 fi
 
+# Advisory — the cert might exist but lack the codeSigning EKU. Warn and
+# let xcodebuild decide. If this becomes a hard failure, run:
+#   security find-identity -v -p codesigning
+# and compare with:
+#   security find-identity -v
+# The first list is what Apple considers codesign-valid; the second is
+# every identity with a private key.
+if ! security find-identity -v -p codesigning | grep -qF "\"$SIGN_IDENTITY\""; then
+    echo "warning: \"$SIGN_IDENTITY\" exists but is not listed as codesigning-valid." >&2
+    echo "         Attempting build anyway — xcodebuild will error out if this fails." >&2
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Quit running Ledge
 # ---------------------------------------------------------------------------
@@ -67,7 +86,7 @@ sleep 0.5
 # 3. Build Release
 # ---------------------------------------------------------------------------
 
-echo "→ Building $CONFIGURATION with identity: $SIGN_IDENTITY…"
+echo "→ Building ${CONFIGURATION} with identity: ${SIGN_IDENTITY}…"
 xcodebuild \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
@@ -89,7 +108,7 @@ fi
 # 4. Install (ditto preserves signature metadata and xattrs)
 # ---------------------------------------------------------------------------
 
-echo "→ Installing to $APP_DEST…"
+echo "→ Installing to ${APP_DEST}…"
 if [[ -d "$APP_DEST" && ! -w "$APP_DEST" ]]; then
     # Rare on admin Macs; fall back to sudo if /Applications is locked down.
     sudo ditto "$APP_SOURCE" "$APP_DEST"
