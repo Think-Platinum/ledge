@@ -1454,6 +1454,180 @@ class DisplayManager: ObservableObject {
         logger.notice("SNAPSHOT[\(tag, privacy: .public)] isActive=\(self.isActive, privacy: .public) wasActive=\(self.wasActive, privacy: .public) blanked=\(self.isDisplayBlanked, privacy: .public) panel=[\(panelDesc, privacy: .public)] helper=[\(helperDesc, privacy: .public)] edge=[\(screenDesc, privacy: .public)]")
     }
 
+    // MARK: - Self-Check
+    //
+    // Structured evaluation of the core display invariants. The Developer
+    // Settings view renders these as a pass/fail list so the user can see
+    // at a glance which of the overlapping state sources have drifted,
+    // without reading logs or attaching a debugger.
+
+    enum SelfCheckStatus: Equatable {
+        case pass
+        case fail
+        case skipped  // precondition not met (e.g. panel nil); not a failure
+    }
+
+    struct SelfCheckResult: Identifiable, Equatable {
+        let id: UUID
+        let name: String
+        let status: SelfCheckStatus
+        /// Optional human-readable explanation shown alongside the dot.
+        /// Populated for failures and skips; nil for passes.
+        let detail: String?
+
+        init(name: String, status: SelfCheckStatus, detail: String? = nil) {
+            self.id = UUID()
+            self.name = name
+            self.status = status
+            self.detail = detail
+        }
+    }
+
+    /// Evaluate the core display invariants and return a structured result
+    /// list. Also writes a snapshot to `os.log` so the outcome is preserved.
+    ///
+    /// Invariants checked:
+    /// - (a) `xeneonScreen` matches a currently connected Edge.
+    /// - (b) `panel != nil` iff `isActive`.
+    /// - (c) `panel.screen === xeneonScreen` (identity check).
+    /// - (d) `panel.frame == xeneonScreen.frame`.
+    /// - (e) `fullscreenHelper == nil` OR `helper.screen === xeneonScreen`.
+    /// - (f) `panel` is above `fullscreenHelper` in window order.
+    ///
+    /// When the Edge is not connected, a single "skipped" row is returned
+    /// rather than failing every check — per the spec in #181, that state
+    /// is reported explicitly.
+    func runSelfCheck() -> [SelfCheckResult] {
+        var results: [SelfCheckResult] = []
+
+        let connectedEdge = NSScreen.screens.first { isXenonEdgeByResolution($0) || isXenonEdgeByName($0) }
+
+        // (a) xeneonScreen matches a currently connected Edge
+        let aPassed = xeneonScreen != nil && connectedEdge != nil
+            && (isXenonEdgeByResolution(xeneonScreen!) || isXenonEdgeByName(xeneonScreen!))
+        var aDetail: String? = nil
+        if xeneonScreen == nil && connectedEdge == nil {
+            aDetail = "Edge not connected"
+        } else if xeneonScreen == nil {
+            aDetail = "xeneonScreen is nil but an Edge is connected (\(connectedEdge!.localizedName))"
+        } else if !aPassed {
+            aDetail = "xeneonScreen=\(xeneonScreen!.localizedName) does not match Edge criteria"
+        }
+        results.append(SelfCheckResult(
+            name: "xeneonScreen matches connected Edge",
+            status: aPassed ? .pass : .fail,
+            detail: aDetail
+        ))
+
+        // If no Edge is connected, skip the panel-level checks rather than
+        // failing each row. The user will fix the missing Edge first.
+        guard connectedEdge != nil else {
+            results.append(SelfCheckResult(
+                name: "Panel & helper checks",
+                status: .skipped,
+                detail: "Connect the Xeneon Edge to run the full self-check."
+            ))
+            logger.notice("Self-check: Edge not connected — skipped detailed checks")
+            logSnapshot("self-check-no-edge")
+            return results
+        }
+
+        // (b) panel != nil iff isActive
+        let bAligned = (panel != nil) == isActive
+        results.append(SelfCheckResult(
+            name: "panel != nil iff isActive",
+            status: bAligned ? .pass : .fail,
+            detail: bAligned ? nil : "panel=\(panel == nil ? "nil" : "non-nil"), isActive=\(isActive)"
+        ))
+
+        // (c) panel.screen === xeneonScreen
+        if let panel {
+            let cMatches = panel.screen === xeneonScreen
+            results.append(SelfCheckResult(
+                name: "panel.screen === xeneonScreen",
+                status: cMatches ? .pass : .fail,
+                detail: cMatches ? nil : "panel.screen=\(panel.screen?.localizedName ?? "nil"), xeneonScreen=\(xeneonScreen?.localizedName ?? "nil")"
+            ))
+        } else {
+            results.append(SelfCheckResult(
+                name: "panel.screen === xeneonScreen",
+                status: .skipped,
+                detail: "panel is nil"
+            ))
+        }
+
+        // (d) panel.frame == xeneonScreen.frame
+        if let panel, let edge = xeneonScreen {
+            let dMatches = panel.frame == edge.frame
+            results.append(SelfCheckResult(
+                name: "panel.frame == xeneonScreen.frame",
+                status: dMatches ? .pass : .fail,
+                detail: dMatches ? nil : "panel=\(NSStringFromRect(panel.frame)), edge=\(NSStringFromRect(edge.frame))"
+            ))
+        } else {
+            results.append(SelfCheckResult(
+                name: "panel.frame == xeneonScreen.frame",
+                status: .skipped,
+                detail: "panel or xeneonScreen missing"
+            ))
+        }
+
+        // (e) fullscreenHelper.screen === xeneonScreen (or helper is nil)
+        if let helper = fullscreenHelper {
+            let eMatches = helper.screen === xeneonScreen
+            results.append(SelfCheckResult(
+                name: "fullscreenHelper on Edge (or absent)",
+                status: eMatches ? .pass : .fail,
+                detail: eMatches ? nil : "helper.screen=\(helper.screen?.localizedName ?? "nil"), xeneonScreen=\(xeneonScreen?.localizedName ?? "nil")"
+            ))
+        } else {
+            results.append(SelfCheckResult(
+                name: "fullscreenHelper on Edge (or absent)",
+                status: .pass,
+                detail: nil
+            ))
+        }
+
+        // (f) panel is above fullscreenHelper in window order
+        if let panel, let helper = fullscreenHelper {
+            // `NSApp.orderedWindows` returns windows front-to-back.
+            // A lower index means closer to the front.
+            let ordered = NSApp.orderedWindows
+            let panelIdx = ordered.firstIndex(of: panel)
+            let helperIdx = ordered.firstIndex(of: helper)
+            let fPassed: Bool
+            let fDetail: String?
+            if let pi = panelIdx, let hi = helperIdx {
+                fPassed = pi < hi
+                fDetail = fPassed ? nil : "panel at z-index \(pi), helper at z-index \(hi) (lower = frontmost)"
+            } else {
+                fPassed = false
+                fDetail = "one or both windows not in NSApp.orderedWindows (panel=\(panelIdx.map(String.init) ?? "—"), helper=\(helperIdx.map(String.init) ?? "—"))"
+            }
+            results.append(SelfCheckResult(
+                name: "panel above fullscreenHelper in z-order",
+                status: fPassed ? .pass : .fail,
+                detail: fDetail
+            ))
+        } else {
+            results.append(SelfCheckResult(
+                name: "panel above fullscreenHelper in z-order",
+                status: .skipped,
+                detail: "panel or helper missing"
+            ))
+        }
+
+        // Log the aggregate outcome so the result is persisted and visible
+        // alongside the state snapshot that generated it.
+        let passCount = results.filter { $0.status == .pass }.count
+        let failCount = results.filter { $0.status == .fail }.count
+        let skipCount = results.filter { $0.status == .skipped }.count
+        logger.notice("Self-check: \(passCount, privacy: .public) pass, \(failCount, privacy: .public) fail, \(skipCount, privacy: .public) skipped")
+        logSnapshot("self-check")
+
+        return results
+    }
+
     // MARK: - Debug Info
 
     /// Returns info about all connected screens (for the settings UI).

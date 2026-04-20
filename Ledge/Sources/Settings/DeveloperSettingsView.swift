@@ -13,6 +13,7 @@ struct DeveloperSettingsView: View {
     @State private var logCategoryFilter: String = "All"
     @State private var logTimeWindow: LogTimeWindow = .oneHour
     @State private var isLoadingLogs: Bool = false
+    @State private var selfCheckResults: [DisplayManager.SelfCheckResult] = []
 
     private let bundleID = Bundle.main.bundleIdentifier ?? "com.thinkplatinum.Ledge"
 
@@ -328,6 +329,61 @@ struct DeveloperSettingsView: View {
                 Text(displayManager.isMouseGuardEnabled ? "Enabled" : "Disabled")
                     .font(.caption.monospaced())
             }
+
+            // Self-check — evaluates the display invariants on demand so
+            // divergence can be seen without reading logs.
+            Button("Run Self-Check") {
+                selfCheckResults = displayManager.runSelfCheck()
+            }
+            .help("Evaluate whether xeneonScreen / panel / fullscreenHelper agree with each other. Result is also written to os.log.")
+
+            if !selfCheckResults.isEmpty {
+                ForEach(selfCheckResults) { result in
+                    selfCheckRow(result)
+                }
+
+                Text("Results also written to os.log (Logs → DisplayManager → SNAPSHOT[self-check]).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Render one self-check row: coloured dot, invariant name, optional detail.
+    private func selfCheckRow(_ result: DisplayManager.SelfCheckResult) -> some View {
+        LabeledContent(result.name) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                selfCheckDot(result.status)
+                if let detail = result.detail {
+                    Text(detail)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(result.status == .fail ? .primary : .secondary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.trailing)
+                } else {
+                    Text(selfCheckLabel(result.status))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func selfCheckDot(_ status: DisplayManager.SelfCheckStatus) -> some View {
+        let color: Color
+        switch status {
+        case .pass:    color = .green
+        case .fail:    color = .red
+        case .skipped: color = .gray
+        }
+        return Circle().fill(color).frame(width: 8, height: 8)
+    }
+
+    private func selfCheckLabel(_ status: DisplayManager.SelfCheckStatus) -> String {
+        switch status {
+        case .pass:    return "Pass"
+        case .fail:    return "Fail"
+        case .skipped: return "Skipped"
         }
     }
 
