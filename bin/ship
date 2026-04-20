@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# bin/ship — build Ledge Release, install to /Applications, relaunch.
+#
+# Uses a stable self-signed code-signing identity so macOS preserves
+# Accessibility (and other TCC) grants across rebuilds. Ad-hoc signing
+# (`-`) changes the designated code requirement on every build, which
+# makes macOS treat each rebuild as a new app and re-prompt for
+# Accessibility permission. A stable identity anchors the requirement
+# on the certificate, not the binary hash.
+#
+# First-time setup: create the signing identity once in Keychain Access.
+# If missing, this script prints step-by-step instructions and exits.
+#
+# Override identity name: LEDGE_SIGN_IDENTITY="My Cert" ./bin/ship
+
+set -euo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SCHEME="Ledge"
+readonly PROJECT="Ledge.xcodeproj"
+readonly CONFIGURATION="Release"
+readonly BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
+readonly INSTALL_DIR="${INSTALL_DIR:-/Applications}"
+readonly APP_NAME="Ledge.app"
+readonly SIGN_IDENTITY="${LEDGE_SIGN_IDENTITY:-Ledge Dev}"
+
+cd "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# 1. Verify signing identity exists
+# ---------------------------------------------------------------------------
+
+if ! security find-identity -v -p codesigning | grep -qF "\"$SIGN_IDENTITY\""; then
+    cat <<EOF >&2
+error: code-signing identity "$SIGN_IDENTITY" not found.
+
+To preserve Accessibility permission across rebuilds, Ledge needs to
+be signed by a stable identity instead of ad-hoc. Create one once:
+
+  1. Open Keychain Access.
+  2. Keychain Access menu → Certificate Assistant → Create a Certificate…
+  3. Name:              $SIGN_IDENTITY
+     Identity Type:     Self Signed Root
+     Certificate Type:  Code Signing
+     (tick "Let me override defaults" to set expiry > 1 year if wanted)
+  4. Click Create, then Done.
+
+The first install with this identity will re-prompt for Accessibility once.
+Every build after that will keep the permission.
+
+Override the identity name by exporting LEDGE_SIGN_IDENTITY before running.
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Quit running Ledge
+# ---------------------------------------------------------------------------
+
+echo "→ Quitting running Ledge (if any)…"
+osascript -e 'tell application "Ledge" to quit' 2>/dev/null || true
+# Give it a moment to release files before we overwrite.
+sleep 0.5
+
+# ---------------------------------------------------------------------------
+# 3. Build Release
+# ---------------------------------------------------------------------------
+
+echo "→ Building $CONFIGURATION with identity: $SIGN_IDENTITY…"
+xcodebuild \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    -derivedDataPath "$BUILD_DIR" \
+    CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+    CODE_SIGN_STYLE=Manual \
+    -quiet
+
+APP_SOURCE="$BUILD_DIR/Build/Products/$CONFIGURATION/$APP_NAME"
+APP_DEST="$INSTALL_DIR/$APP_NAME"
+
+if [[ ! -d "$APP_SOURCE" ]]; then
+    echo "error: build succeeded but $APP_SOURCE is missing" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Install (ditto preserves signature metadata and xattrs)
+# ---------------------------------------------------------------------------
+
+echo "→ Installing to $APP_DEST…"
+if [[ -d "$APP_DEST" && ! -w "$APP_DEST" ]]; then
+    # Rare on admin Macs; fall back to sudo if /Applications is locked down.
+    sudo ditto "$APP_SOURCE" "$APP_DEST"
+else
+    ditto "$APP_SOURCE" "$APP_DEST"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Launch and report build identity
+# ---------------------------------------------------------------------------
+
+echo "→ Launching Ledge…"
+open "$APP_DEST"
+
+SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+DIRTY="clean"
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    DIRTY="DIRTY"
+fi
+BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+echo
+echo "  Shipped: $APP_DEST"
+echo "  Commit:  $SHA ($DIRTY)"
+echo "  Built:   $BUILT_AT UTC"
+echo "  Signed:  $SIGN_IDENTITY"

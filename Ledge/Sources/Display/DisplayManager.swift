@@ -28,6 +28,19 @@ class DisplayManager: ObservableObject {
     /// Whether the panel is currently displayed.
     @Published private(set) var isActive: Bool = false
 
+    /// User intent: "should the panel be visible when the Edge is present?"
+    ///
+    /// Unlike `isActive` (current runtime state), this tracks intent and
+    /// persists across transient disconnects. Set `true` by a successful
+    /// `revealPanel`, cleared by an explicit `hidePanel`. `destroyPanel`
+    /// deliberately does NOT touch it, because a disconnect is transient
+    /// and should not be treated as user intent to hide.
+    ///
+    /// `handleDisplayChange` uses this to auto-restore the panel after
+    /// sleep/wake and cable flaps — so the user doesn't have to press
+    /// "Show Panel" every time macOS briefly drops the display.
+    @Published private(set) var wasActive: Bool = false
+
     /// Status message for the settings UI.
     @Published private(set) var statusMessage: String = "Searching for Xeneon Edge..."
 
@@ -371,8 +384,12 @@ class DisplayManager: ObservableObject {
         panel.orderFrontRegardless()
         panel.makeKey()
         isActive = true
+        // Record user intent — set AFTER the nil-guard and the ordering
+        // calls, so failed reveals do not flip the flag. `hidePanel` clears
+        // it; `destroyPanel` deliberately does not (disconnect is transient).
+        wasActive = true
         statusMessage = "Active on \(screen.localizedName)"
-        logger.info("Panel is now visible on Xeneon Edge")
+        logger.notice("Panel is now visible on Xeneon Edge")
 
         // If the fullscreen helper briefly activated the app, yield focus back.
         // NSApp.deactivate() lets the previously active app regain focus.
@@ -426,9 +443,11 @@ class DisplayManager: ObservableObject {
         let hadPanel = panel != nil
         panel?.orderOut(nil)
         isActive = false
+        // Explicit user dismiss — clear intent so reconnects don't auto-restore.
+        wasActive = false
         tearDownFullscreenHelper()
         statusMessage = "Panel hidden (Xeneon Edge still connected)"
-        logger.info("hidePanel: orderOut called (hadPanel=\(hadPanel))")
+        logger.notice("hidePanel: orderOut called (hadPanel=\(hadPanel, privacy: .public))")
         logSnapshot("hidePanel-exit")
     }
 
@@ -437,10 +456,17 @@ class DisplayManager: ObservableObject {
         logSnapshot("destroyPanel-entry")
         panel?.orderOut(nil)
         touchRemapper.panel = nil
+        // Previously only `touchRemapper.panel` was cleared. The hid reader's
+        // strong reference kept the LedgePanel alive after `panel = nil`, so
+        // its screen-change observer continued firing — logs showed "Panel
+        // changed screen → XENEON EDGE" events arriving *after* destroyPanel
+        // completed. Clearing both references ensures the panel actually
+        // deallocates when we ask it to.
+        hidTouchReader.panel = nil
         panel = nil
         isActive = false
         tearDownFullscreenHelper()
-        logger.info("Panel destroyed")
+        logger.notice("Panel destroyed")
         logSnapshot("destroyPanel-exit")
     }
 
@@ -480,28 +506,41 @@ class DisplayManager: ObservableObject {
 
         if let currentScreen = xeneonScreen {
             if currentScreen != previousScreen {
-                // Screen changed (e.g., rearranged) — reposition panel AND update touch remapper
+                // Screen changed (e.g., rearranged, or Edge returned after disconnect).
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
                 // Display topology changed — clear any stuck blanking so the
                 // rebuilt panel renders widgets instead of a black rectangle.
                 unblankDisplay(reason: "display topology changed")
-                panel?.reposition(on: currentScreen)
+
+                // These updates are safe whether or not a panel currently exists —
+                // they prime the touch pipeline for the current Edge geometry.
                 touchRemapper.updateTargetScreen(currentScreen)
                 hidTouchReader.updatePanelFrame(currentScreen.frame)
                 mouseGuard.updateEdgeScreen(currentScreen)
 
-                // The fullscreen helper's Space was created for the old screen frame.
-                // Tear it down and recreate for the new screen position so the
-                // fullscreen Space and menu bar hiding follow the display move.
-                if fullscreenHelper != nil {
-                    logger.info("Rebuilding fullscreen helper for new screen frame")
-                    tearDownFullscreenHelper()
-                    // Brief delay to let the async fullscreen exit animation begin
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        guard let self, let screen = self.xeneonScreen else { return }
-                        self.ensureFullscreenHelper(on: screen) { [weak self] in
+                if panel == nil && wasActive {
+                    // Transient disconnect (sleep/wake, cable flap) destroyed
+                    // the panel — but the user wanted it visible. Restore it.
+                    // `showPanel()` creates the panel, builds a new fullscreen
+                    // helper, and re-attaches content via `onPanelCreated`.
+                    logger.notice("handleDisplayChange: panel missing, wasActive=true — auto-restoring via showPanel")
+                    showPanel()
+                } else {
+                    // Panel survived (or user had dismissed it) — reposition
+                    // what we have and rebuild the helper's Space for the new
+                    // screen frame.
+                    panel?.reposition(on: currentScreen)
+
+                    if fullscreenHelper != nil {
+                        logger.info("Rebuilding fullscreen helper for new screen frame")
+                        tearDownFullscreenHelper()
+                        // Brief delay to let the async fullscreen exit animation begin
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                             guard let self, let screen = self.xeneonScreen else { return }
-                            self.revealPanel(on: screen)
+                            self.ensureFullscreenHelper(on: screen) { [weak self] in
+                                guard let self, let screen = self.xeneonScreen else { return }
+                                self.revealPanel(on: screen)
+                            }
                         }
                     }
                 }
@@ -1412,7 +1451,7 @@ class DisplayManager: ObservableObject {
         // .notice level — macOS purges .info under memory pressure, which
         // silently destroys the diagnostic trail we need. Snapshot is the
         // primary audit artefact, so it must persist.
-        logger.notice("SNAPSHOT[\(tag, privacy: .public)] isActive=\(self.isActive, privacy: .public) blanked=\(self.isDisplayBlanked, privacy: .public) panel=[\(panelDesc, privacy: .public)] helper=[\(helperDesc, privacy: .public)] edge=[\(screenDesc, privacy: .public)]")
+        logger.notice("SNAPSHOT[\(tag, privacy: .public)] isActive=\(self.isActive, privacy: .public) wasActive=\(self.wasActive, privacy: .public) blanked=\(self.isDisplayBlanked, privacy: .public) panel=[\(panelDesc, privacy: .public)] helper=[\(helperDesc, privacy: .public)] edge=[\(screenDesc, privacy: .public)]")
     }
 
     // MARK: - Debug Info
