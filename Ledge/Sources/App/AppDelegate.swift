@@ -48,6 +48,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register all built-in widgets
         WidgetRegistry.shared.registerBuiltInWidgets()
 
+        // Wire panel-content re-attach BEFORE the first showPanel fires.
+        // DisplayManager invokes this every time it creates a new LedgePanel,
+        // so content is re-attached after sleep/wake disconnects, Force
+        // Unblank rebuilds, and any other panel re-creation path — not only
+        // at launch.
+        displayManager.onPanelCreated = { [weak self] in
+            self?.attachDashboardContent()
+            self?.configurePanelTransparency()
+        }
+
         // Create the system tray icon
         setupStatusItem()
 
@@ -67,8 +77,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.displayManager.showPanelWhenReady(requiredPermissions: requiredPerms) { [weak self] in
                     guard let self else { return }
 
-                    // Configure panel transparency for blur/image backgrounds
-                    self.configurePanelTransparency()
+                    // Content + transparency are attached automatically via
+                    // displayManager.onPanelCreated — no need to duplicate here.
 
                     // Load the macOS desktop wallpaper for the Edge as a fallback background.
                     // In fullscreen mode the desktop is hidden, so we capture the wallpaper
@@ -76,15 +86,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     if let screen = self.displayManager.xeneonScreen {
                         self.themeManager.loadDesktopWallpaper(for: screen)
                     }
-
-                    let dashboardView = DashboardView(
-                        layoutManager: self.layoutManager,
-                        configStore: self.configStore,
-                        registry: WidgetRegistry.shared
-                    )
-                    .environmentObject(self.displayManager)
-                    .environment(self.themeManager)
-                    self.displayManager.setPanelContent(dashboardView)
 
                     // Start touch remapper — Accessibility is already granted at this point.
                     self.displayManager.startTouchRemapper()
@@ -231,6 +232,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Panel Configuration
+
+    /// Build and attach the dashboard SwiftUI view to the panel.
+    ///
+    /// Called once at launch and again by `displayManager.onPanelCreated` every
+    /// time a new `LedgePanel` is built — so content survives disconnect/reconnect
+    /// cycles and Force Unblank rebuilds without manual intervention.
+    private func attachDashboardContent() {
+        let dashboardView = DashboardView(
+            layoutManager: self.layoutManager,
+            configStore: self.configStore,
+            registry: WidgetRegistry.shared
+        )
+        .environmentObject(self.displayManager)
+        .environment(self.themeManager)
+        self.displayManager.setPanelContent(dashboardView)
+    }
 
     /// Configure the panel's opacity based on the current background settings.
     /// Blur and Transparent widget styles require a non-opaque panel so the

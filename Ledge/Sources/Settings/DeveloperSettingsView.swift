@@ -11,6 +11,7 @@ struct DeveloperSettingsView: View {
     @State private var showResetConfirmation = false
     @State private var logEntries: [String] = []
     @State private var logCategoryFilter: String = "All"
+    @State private var logTimeWindow: LogTimeWindow = .oneHour
     @State private var isLoadingLogs: Bool = false
 
     private let bundleID = Bundle.main.bundleIdentifier ?? "com.thinkplatinum.Ledge"
@@ -19,6 +20,27 @@ struct DeveloperSettingsView: View {
         "All", "TouchRemapper", "HIDTouchReader", "HIDTouchDetector",
         "DisplayManager", "TouchWatchdog", "MouseGuard", "LedgePanel"
     ]
+
+    /// How far back "Load Logs" queries OSLogStore. `OSLogStore` is scoped to
+    /// the current process so "since launch" is effectively the upper bound
+    /// anyway — this just controls the window width.
+    enum LogTimeWindow: String, CaseIterable {
+        case fiveMinutes = "5m"
+        case thirtyMinutes = "30m"
+        case oneHour = "1h"
+        case fourHours = "4h"
+        case sinceLaunch = "Launch"
+
+        var seconds: TimeInterval {
+            switch self {
+            case .fiveMinutes:   return 300
+            case .thirtyMinutes: return 1800
+            case .oneHour:       return 3600
+            case .fourHours:     return 14400
+            case .sinceLaunch:   return 86400 // clamped by OSLogStore to process start
+            }
+        }
+    }
 
     var body: some View {
         Form {
@@ -320,6 +342,13 @@ struct DeveloperSettingsView: View {
             }
             .pickerStyle(.segmented)
 
+            Picker("Window", selection: $logTimeWindow) {
+                ForEach(LogTimeWindow.allCases, id: \.self) { window in
+                    Text(window.rawValue).tag(window)
+                }
+            }
+            .pickerStyle(.segmented)
+
             if logEntries.isEmpty && !isLoadingLogs {
                 Text("Press \"Load Logs\" to fetch recent entries")
                     .foregroundStyle(.secondary)
@@ -410,13 +439,17 @@ struct DeveloperSettingsView: View {
     private func refreshLogs() {
         isLoadingLogs = true
         let category = logCategoryFilter
+        let windowSeconds = logTimeWindow.seconds
 
         // Run OSLogStore query on a background thread — it's expensive
         Task.detached(priority: .userInitiated) {
             let results: [String]
             do {
                 let store = try OSLogStore(scope: .currentProcessIdentifier)
-                let position = store.position(timeIntervalSinceEnd: -300)  // Last 5 minutes
+                // OSLogStore is scoped to the current process, so the store
+                // cannot return entries from before launch — it clamps to the
+                // process start regardless of the window we request.
+                let position = store.position(timeIntervalSinceEnd: -windowSeconds)
 
                 let predicate: NSPredicate
                 if category == "All" {
@@ -432,7 +465,7 @@ struct DeveloperSettingsView: View {
                     let time = logEntry.date.formatted(.dateTime.hour().minute().second().secondFraction(.fractional(3)))
                     return "[\(time)] [\(logEntry.category)] \(logEntry.composedMessage)"
                 }
-                .suffix(200)
+                .suffix(500)
                 .reversed()
                 .map { $0 }
             } catch {

@@ -217,6 +217,14 @@ class DisplayManager: ObservableObject {
     /// Timer polling for Accessibility permission before fullscreen.
     private var accessibilityGateTimer: Timer?
 
+    /// Invoked every time `showPanel()` creates a new `LedgePanel` instance.
+    ///
+    /// AppDelegate wires this to re-attach the dashboard content view and
+    /// re-apply panel transparency. Without it, a rebuild after sleep/wake
+    /// or Force Unblank produces a panel with no content — opaque black
+    /// because `LedgePanel.backgroundColor = .black`.
+    var onPanelCreated: (@MainActor () -> Void)?
+
     // MARK: - Lifecycle
 
     init() {
@@ -264,7 +272,7 @@ class DisplayManager: ObservableObject {
         for (index, screen) in screens.enumerated() {
             let frame = screen.frame
             let name = screen.localizedName
-            logger.info("  Screen \(index): \(name) — \(Int(frame.width))×\(Int(frame.height))")
+            logger.info("  Screen \(index, privacy: .public): \(name, privacy: .public) — \(Int(frame.width), privacy: .public)×\(Int(frame.height), privacy: .public) at (\(Int(frame.origin.x), privacy: .public),\(Int(frame.origin.y), privacy: .public))")
         }
     }
 
@@ -282,6 +290,7 @@ class DisplayManager: ObservableObject {
     /// With "Displays have separate Spaces" enabled, each display manages its own Spaces
     /// independently so this does NOT affect Space switching on the primary display.
     func showPanel() {
+        logSnapshot("showPanel-entry")
         guard let screen = xeneonScreen else {
             logger.error("Cannot show panel: no Xeneon Edge screen detected")
             return
@@ -311,7 +320,14 @@ class DisplayManager: ObservableObject {
                 }
             }
 
-            logger.info("Created LedgePanel on Xeneon Edge")
+            logger.notice("Created LedgePanel on Xeneon Edge")
+
+            // A fresh panel has no contentView. Ask the owner (AppDelegate)
+            // to re-attach the dashboard and re-apply transparency. Without
+            // this, the first-launch content-attach path is the only one
+            // that runs, so any rebuild after sleep/wake or Force Unblank
+            // produces a content-less black panel.
+            onPanelCreated?()
         }
 
         // Enter fullscreen on the Edge to auto-hide the menu bar via the
@@ -326,19 +342,34 @@ class DisplayManager: ObservableObject {
     /// Actually make the panel visible. Called directly (no fullscreen helper needed)
     /// or after the fullscreen helper finishes its transition.
     private func revealPanel(on screen: NSScreen) {
+        logSnapshot("revealPanel-entry")
+
+        // If we reach here without a panel the caller has raced us — typically
+        // a display-change notification rebuilt the fullscreen helper after a
+        // disconnect destroyed the panel. Never claim the panel is visible
+        // when it isn't: tear the orphaned helper down and surface the state.
+        guard let panel else {
+            logger.error("revealPanel called with no panel — tearing down orphaned helper")
+            tearDownFullscreenHelper()
+            isActive = false
+            statusMessage = "Panel lost — press Show Panel to recover"
+            logSnapshot("revealPanel-exit-noPanel")
+            return
+        }
+
         // The panel is about to be made visible — ensure its contentView isn't
         // still hidden from an earlier blank that never unblanked cleanly.
         unblankDisplay(reason: "panel revealed")
 
         // Ensure panel is positioned correctly on the target screen
-        panel?.setFrame(screen.frame, display: true, animate: false)
+        panel.setFrame(screen.frame, display: true, animate: false)
 
         // Use orderFrontRegardless + makeKey separately instead of makeKeyAndOrderFront.
         // makeKeyAndOrderFront can trigger app activation even on .nonactivatingPanel.
         // orderFrontRegardless brings the panel forward without activating the app.
         NSApp.preventWindowOrdering()
-        panel?.orderFrontRegardless()
-        panel?.makeKey()
+        panel.orderFrontRegardless()
+        panel.makeKey()
         isActive = true
         statusMessage = "Active on \(screen.localizedName)"
         logger.info("Panel is now visible on Xeneon Edge")
@@ -350,6 +381,8 @@ class DisplayManager: ObservableObject {
                 NSApp.deactivate()
             }
         }
+
+        logSnapshot("revealPanel-exit")
     }
 
     /// Lightweight panel re-assertion — restores window level and ordering
@@ -389,21 +422,26 @@ class DisplayManager: ObservableObject {
 
     /// Hide the panel (but keep the screen reference).
     func hidePanel() {
+        logSnapshot("hidePanel-entry")
+        let hadPanel = panel != nil
         panel?.orderOut(nil)
         isActive = false
         tearDownFullscreenHelper()
         statusMessage = "Panel hidden (Xeneon Edge still connected)"
-        logger.info("Panel hidden")
+        logger.info("hidePanel: orderOut called (hadPanel=\(hadPanel))")
+        logSnapshot("hidePanel-exit")
     }
 
     /// Completely tear down the panel.
     func destroyPanel() {
+        logSnapshot("destroyPanel-entry")
         panel?.orderOut(nil)
         touchRemapper.panel = nil
         panel = nil
         isActive = false
         tearDownFullscreenHelper()
         logger.info("Panel destroyed")
+        logSnapshot("destroyPanel-exit")
     }
 
     /// Set the SwiftUI content view on the panel.
@@ -435,6 +473,7 @@ class DisplayManager: ObservableObject {
 
     private func handleDisplayChange() {
         logger.info("Display configuration changed, re-scanning...")
+        logSnapshot("handleDisplayChange-entry")
 
         let previousScreen = xeneonScreen
         detectXenonEdge()
@@ -473,6 +512,8 @@ class DisplayManager: ObservableObject {
             destroyPanel()
             statusMessage = "Xeneon Edge disconnected. Waiting for reconnection..."
         }
+
+        logSnapshot("handleDisplayChange-exit")
     }
 
     // MARK: - Touch Remapper Management
@@ -1288,12 +1329,42 @@ class DisplayManager: ObservableObject {
         }
     }
 
-    /// Debug / recovery action — force the panel content visible and reset
-    /// blanking state. Exposed via Developer Settings so a stuck panel can be
-    /// recovered without restarting Ledge.
+    /// Debug / recovery action — clear blanking state AND re-assert panel
+    /// position, level, ordering, and fullscreen helper. Exposed via Developer
+    /// Settings so a stuck panel can be recovered without restarting Ledge.
+    ///
+    /// Previously this only toggled `contentView.isHidden`, which was useless
+    /// when the panel had drifted to the wrong screen or been destroyed during
+    /// a sleep/wake storm. Now it's a proper recovery path: it rebuilds the
+    /// panel if missing and re-seats everything on the Edge.
     func forceUnblank() {
         logger.info("Force unblank requested from Settings")
+        logSnapshot("forceUnblank-entry")
+
         unblankDisplay(reason: "force unblank (Settings)")
+
+        guard let screen = xeneonScreen else {
+            logger.warning("Force unblank: no Xeneon Edge detected — nothing to recover")
+            logSnapshot("forceUnblank-exit-noScreen")
+            return
+        }
+
+        if panel == nil {
+            logger.warning("Force unblank: panel missing — rebuilding via showPanel")
+            showPanel()
+            logSnapshot("forceUnblank-exit-rebuilt")
+            return
+        }
+
+        // Panel exists: re-assert frame, level, and ordering so a drifted
+        // panel snaps back to the Edge. Then re-assert the fullscreen helper
+        // in case its Space was torn down.
+        panel?.setFrame(screen.frame, display: true, animate: false)
+        panel?.level = .screenSaver
+        panel?.orderFrontRegardless()
+        reassertFullscreen(on: screen)
+
+        logSnapshot("forceUnblank-exit-reasserted")
     }
 
     // MARK: - Detection Helpers
@@ -1313,7 +1384,35 @@ class DisplayManager: ObservableObject {
         xeneonScreen = screen
         let frame = screen.frame
         statusMessage = "Found: \(screen.localizedName) (\(Int(frame.width))×\(Int(frame.height)))"
-        logger.info("Xeneon Edge detected via \(method): \(screen.localizedName) at \(Int(frame.origin.x)),\(Int(frame.origin.y))")
+        logger.info("Xeneon Edge detected via \(method, privacy: .public): \(screen.localizedName, privacy: .public) at \(Int(frame.origin.x), privacy: .public),\(Int(frame.origin.y), privacy: .public) size=\(Int(frame.width), privacy: .public)×\(Int(frame.height), privacy: .public)")
+    }
+
+    // MARK: - Diagnostics
+
+    /// Log a single-line snapshot of the panel / helper / screen state.
+    ///
+    /// Call at every major transition so the log tells you which of the four
+    /// overlapping state sources (panel visibility, contentView.isHidden,
+    /// fullscreenHelper, isActive) disagree after a race.
+    private func logSnapshot(_ tag: String) {
+        let panelDesc: String
+        if let panel {
+            panelDesc = "visible=\(panel.isVisible) key=\(panel.isKeyWindow) frame=\(NSStringFromRect(panel.frame)) screen=\(panel.screen?.localizedName ?? "nil") hidden=\(panel.contentView?.isHidden ?? false)"
+        } else {
+            panelDesc = "nil"
+        }
+        let helperDesc: String
+        if let helper = fullscreenHelper {
+            helperDesc = "fs=\(helper.styleMask.contains(.fullScreen)) frame=\(NSStringFromRect(helper.frame))"
+        } else {
+            helperDesc = "nil"
+        }
+        let screenDesc = xeneonScreen.map { "\($0.localizedName) frame=\(NSStringFromRect($0.frame))" } ?? "nil"
+
+        // .notice level — macOS purges .info under memory pressure, which
+        // silently destroys the diagnostic trail we need. Snapshot is the
+        // primary audit artefact, so it must persist.
+        logger.notice("SNAPSHOT[\(tag, privacy: .public)] isActive=\(self.isActive, privacy: .public) blanked=\(self.isDisplayBlanked, privacy: .public) panel=[\(panelDesc, privacy: .public)] helper=[\(helperDesc, privacy: .public)] edge=[\(screenDesc, privacy: .public)]")
     }
 
     // MARK: - Debug Info

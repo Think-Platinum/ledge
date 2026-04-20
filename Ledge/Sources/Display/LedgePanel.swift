@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import os.log
 
 /// A non-activating panel that displays the widget dashboard on the Xeneon Edge.
 ///
@@ -10,6 +11,13 @@ import SwiftUI
 ///
 /// See docs/FOCUS_MANAGEMENT.md for the full rationale.
 class LedgePanel: NSPanel {
+
+    private let logger = Logger(subsystem: "com.ledge.app", category: "LedgePanel")
+
+    /// Observer token for `NSWindow.didChangeScreenNotification` on this panel.
+    /// Used to detect AppKit silently relocating the panel to the wrong display
+    /// (e.g. when the Edge's NSScreen becomes invalid during sleep/wake).
+    private var screenChangeObserver: Any?
 
     /// Creates a new LedgePanel covering the given screen.
     ///
@@ -26,6 +34,28 @@ class LedgePanel: NSPanel {
         )
 
         configurePanel(on: screen)
+        observeScreenChanges()
+        // .notice level — macOS purges .info under memory pressure, which
+        // destroys the diagnostic trail at the worst possible moment.
+        logger.notice("init on \(screen.localizedName, privacy: .public) frame=\(NSStringFromRect(screen.frame), privacy: .public)")
+    }
+
+    deinit {
+        if let obs = screenChangeObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+    }
+
+    private func observeScreenChanges() {
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let name = self.screen?.localizedName ?? "nil"
+            self.logger.warning("Panel changed screen → \(name, privacy: .public) frame=\(NSStringFromRect(self.frame), privacy: .public)")
+        }
     }
 
     private func configurePanel(on screen: NSScreen) {
@@ -73,6 +103,33 @@ class LedgePanel: NSPanel {
     /// (which excludes the menu bar region). We want full coverage.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         return frameRect
+    }
+
+    // MARK: - State-change logging
+    //
+    // These overrides exist so the Developer log filter "LedgePanel" actually
+    // shows panel-level activity. Without them, every state change is only
+    // visible through DisplayManager's perspective — which hides cases where
+    // the two disagree.
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animationFlag: Bool) {
+        logger.notice("setFrame \(NSStringFromRect(frameRect), privacy: .public) display=\(flag, privacy: .public) animate=\(animationFlag, privacy: .public) screen=\(self.screen?.localizedName ?? "nil", privacy: .public)")
+        super.setFrame(frameRect, display: flag, animate: animationFlag)
+    }
+
+    override func orderFront(_ sender: Any?) {
+        logger.notice("orderFront (currently visible=\(self.isVisible, privacy: .public))")
+        super.orderFront(sender)
+    }
+
+    override func orderFrontRegardless() {
+        logger.notice("orderFrontRegardless (currently visible=\(self.isVisible, privacy: .public))")
+        super.orderFrontRegardless()
+    }
+
+    override func orderOut(_ sender: Any?) {
+        logger.notice("orderOut (was visible=\(self.isVisible, privacy: .public))")
+        super.orderOut(sender)
     }
 
     // MARK: - Focus Management
