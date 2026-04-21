@@ -346,9 +346,16 @@ class DisplayManager: ObservableObject {
         // Enter fullscreen on the Edge to auto-hide the menu bar via the
         // fullscreen helper. The LedgePanel's .fullScreenAuxiliary collection
         // behavior makes it render on top of the fullscreen Space.
+        //
+        // The fullscreen transition is async (~1-2s). During that window macOS
+        // may rearrange displays (sleep/wake, cable hot-plug), leaving the
+        // captured `screen` reference with stale coordinates. Re-fetch
+        // `xeneonScreen` inside the completion so revealPanel works with the
+        // current Edge frame, not the one we saw when showPanel was called.
         ensureFullscreenHelper(on: screen) { [weak self] in
             guard let self else { return }
-            self.revealPanel(on: screen)
+            let latestScreen = self.xeneonScreen ?? screen
+            self.revealPanel(on: latestScreen)
         }
     }
 
@@ -374,8 +381,15 @@ class DisplayManager: ObservableObject {
         // still hidden from an earlier blank that never unblanked cleanly.
         unblankDisplay(reason: "panel revealed")
 
-        // Ensure panel is positioned correctly on the target screen
-        panel.setFrame(screen.frame, display: true, animate: false)
+        // Always trust `xeneonScreen` over the captured `screen`. `screen` is
+        // captured at showPanel time into the fullscreen-helper completion
+        // closure, then used ~1–2s later after the fullscreen transition
+        // completes. If macOS moved the Edge during that window (sleep/wake,
+        // display rearrangement), the captured NSScreen holds stale coords
+        // and the panel would reveal at the old position — shifted off the
+        // current Edge. Re-fetching closes the race.
+        let effectiveFrame = xeneonScreen?.frame ?? screen.frame
+        panel.setFrame(effectiveFrame, display: true, animate: false)
 
         // Use orderFrontRegardless + makeKey separately instead of makeKeyAndOrderFront.
         // makeKeyAndOrderFront can trigger app activation even on .nonactivatingPanel.
