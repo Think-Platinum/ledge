@@ -53,7 +53,7 @@ class HomeAssistantClient {
         for entityID in entityIDs {
             let urlString = "\(base)/api/states/\(entityID)"
             guard let url = URL(string: urlString) else {
-                logger.error("Invalid URL for entity \(entityID): \(urlString)")
+                logger.error("Invalid URL for entity \(entityID, privacy: .public): \(urlString, privacy: .public)")
                 result.errors.append("Invalid URL for \(entityID)")
                 continue
             }
@@ -67,22 +67,22 @@ class HomeAssistantClient {
                 if let httpResponse = response as? HTTPURLResponse {
                     if httpResponse.statusCode == 401 {
                         result.errors.append("401 Unauthorized — check access token")
-                        logger.error("HTTP 401 for \(entityID) — invalid or expired access token")
+                        logger.error("HTTP 401 for \(entityID, privacy: .public) — invalid or expired access token")
                         continue
                     } else if httpResponse.statusCode == 404 {
                         result.errors.append("'\(entityID)' not found — use full ID (e.g. light.name)")
-                        logger.error("HTTP 404 for \(entityID) — entity not found on server")
+                        logger.error("HTTP 404 for \(entityID, privacy: .public) — entity not found on server")
                         continue
                     } else if httpResponse.statusCode != 200 {
                         let body = String(data: data, encoding: .utf8) ?? "(binary)"
                         result.errors.append("HTTP \(httpResponse.statusCode) for \(entityID)")
-                        logger.error("HTTP \(httpResponse.statusCode) for \(entityID): \(body)")
+                        logger.error("HTTP \(httpResponse.statusCode, privacy: .public) for \(entityID, privacy: .public): \(body, privacy: .public)")
                         continue
                     }
                 }
 
                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    logger.error("Failed to parse JSON for \(entityID)")
+                    logger.error("Failed to parse JSON for \(entityID, privacy: .public)")
                     result.errors.append("Invalid response for \(entityID)")
                     continue
                 }
@@ -108,19 +108,24 @@ class HomeAssistantClient {
                 case .cannotFindHost: msg = "Cannot find host '\(self.serverURL)'"
                 case .cannotConnectToHost: msg = "Cannot connect to '\(self.serverURL)'"
                 case .timedOut: msg = "Connection timed out"
-                case .notConnectedToInternet: msg = "No internet connection"
+                case .notConnectedToInternet:
+                    // macOS reports -1009 when it either genuinely has no
+                    // internet path OR when the app lacks Local Network
+                    // permission for LAN/.local addresses. Give the user a
+                    // hint so they don't chase a router issue.
+                    msg = "Cannot reach '\(self.serverURL)' — check Settings → Privacy & Security → Local Network and ensure Ledge is enabled"
                 default: msg = error.localizedDescription
                 }
                 result.errors.append(msg)
-                logger.error("Network error fetching \(entityID): \(error.localizedDescription) (code: \(error.code.rawValue))")
+                logger.error("Network error fetching \(entityID, privacy: .public) at \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public) (code: \(error.code.rawValue, privacy: .public))")
             } catch {
                 result.errors.append(error.localizedDescription)
-                logger.error("Failed to fetch \(entityID): \(error.localizedDescription)")
+                logger.error("Failed to fetch \(entityID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
         if !result.errors.isEmpty {
-            logger.warning("Fetched \(result.entities.count)/\(entityIDs.count) entities, \(result.errors.count) errors")
+            logger.warning("Fetched \(result.entities.count, privacy: .public)/\(entityIDs.count, privacy: .public) entities, \(result.errors.count, privacy: .public) errors")
         }
         return result
     }

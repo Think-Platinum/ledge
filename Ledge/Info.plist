@@ -15,5 +15,7 @@
 	<string>Ledge displays your upcoming calendar events in the Calendar widget.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Ledge communicates with Google Chrome to control Google Meet meetings.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Ledge connects to Home Assistant and other services running on your local network.</string>
 </dict>
 </plist>
