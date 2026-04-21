@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Xcode — user-specific state
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Xcode — build output
+build/
+DerivedData/
+*.dSYM
+*.hmap
+*.ipa
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# CocoaPods (not used here but harmless)
+Pods/
+
+# Local environment / secrets
+.env
+.env.local
+*.xcconfig.local
