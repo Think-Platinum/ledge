@@ -10,6 +10,7 @@ import os.log
 nonisolated class SystemAudioBridge: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "SystemAudio")
+    private let debugLog = DebugLogger(category: "SystemAudio")
 
     struct AudioState: Sendable {
         var outputVolume: Float = 0     // 0.0 - 1.0
@@ -161,7 +162,7 @@ nonisolated class SystemAudioBridge: @unchecked Sendable {
         )
 
         guard status == noErr, deviceID != kAudioDeviceUnknown else {
-            logger.debug("Failed to get default \(forInput ? "input" : "output") device: \(status)")
+            debugLog.debug("Failed to get default \(forInput ? "input" : "output") device: \(status)")
             return nil
         }
         return deviceID
@@ -178,7 +179,7 @@ nonisolated class SystemAudioBridge: @unchecked Sendable {
 
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &volume)
         if status != noErr {
-            logger.debug("Failed to get volume: \(status)")
+            debugLog.debug("Failed to get volume: \(status)")
             return 0
         }
         return volume
@@ -195,7 +196,7 @@ nonisolated class SystemAudioBridge: @unchecked Sendable {
 
         let status = AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &vol)
         if status != noErr {
-            logger.debug("Failed to set volume: \(status)")
+            debugLog.debug("Failed to set volume: \(status)")
         }
     }
 
@@ -210,7 +211,7 @@ nonisolated class SystemAudioBridge: @unchecked Sendable {
 
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &muted)
         if status != noErr {
-            logger.debug("Failed to get mute state: \(status)")
+            debugLog.debug("Failed to get mute state: \(status)")
             return false
         }
         return muted != 0
@@ -227,7 +228,7 @@ nonisolated class SystemAudioBridge: @unchecked Sendable {
 
         let status = AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &muteValue)
         if status != noErr {
-            logger.debug("Failed to set mute: \(status)")
+            debugLog.debug("Failed to set mute: \(status)")
         }
     }
 }

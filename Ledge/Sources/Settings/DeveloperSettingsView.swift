@@ -17,11 +17,6 @@ struct DeveloperSettingsView: View {
 
     private let bundleID = Bundle.main.bundleIdentifier ?? "com.thinkplatinum.Ledge"
 
-    private let logCategories = [
-        "All", "TouchRemapper", "HIDTouchReader", "HIDTouchDetector",
-        "DisplayManager", "TouchWatchdog", "MouseGuard", "LedgePanel"
-    ]
-
     /// How far back "Load Logs" queries OSLogStore. `OSLogStore` is scoped to
     /// the current process so "since launch" is effectively the upper bound
     /// anyway — this just controls the window width.
@@ -392,11 +387,21 @@ struct DeveloperSettingsView: View {
     private var logsSection: some View {
         Section("Logs") {
             Picker("Category", selection: $logCategoryFilter) {
-                ForEach(logCategories, id: \.self) { cat in
-                    Text(cat).tag(cat)
+                Text("All").tag("All")
+                Section("Display") {
+                    ForEach(LogCategory.display, id: \.self) { cat in
+                        Text(cat).tag(cat)
+                    }
+                }
+                ForEach(LogCategory.widgetGroups) { group in
+                    Section(group.widget) {
+                        ForEach(group.categories, id: \.self) { cat in
+                            Text(cat).tag(cat)
+                        }
+                    }
                 }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.menu)
 
             Picker("Window", selection: $logTimeWindow) {
                 ForEach(LogTimeWindow.allCases, id: \.self) { window in
@@ -404,6 +409,18 @@ struct DeveloperSettingsView: View {
                 }
             }
             .pickerStyle(.segmented)
+
+            DisclosureGroup("Per-Widget Debug Logging") {
+                ForEach(LogCategory.widgetGroups) { group in
+                    Text(group.widget)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                    ForEach(group.categories, id: \.self) { cat in
+                        CategoryDebugToggle(category: cat)
+                    }
+                }
+            }
 
             if logEntries.isEmpty && !isLoadingLogs {
                 Text("Press \"Load Logs\" to fetch recent entries")
@@ -533,5 +550,22 @@ struct DeveloperSettingsView: View {
                 isLoadingLogs = false
             }
         }
+    }
+}
+
+/// A `Toggle` bound to `UserDefaults` via `@AppStorage` for a single log
+/// category's `.debug` gate. Extracted because `@AppStorage` requires a
+/// static key literal — this wrapper parameterises it by category name.
+private struct CategoryDebugToggle: View {
+    let category: String
+    @AppStorage var enabled: Bool
+
+    init(category: String) {
+        self.category = category
+        self._enabled = AppStorage(wrappedValue: false, DebugLogger.debugEnabledKey(for: category))
+    }
+
+    var body: some View {
+        Toggle(category, isOn: $enabled)
     }
 }

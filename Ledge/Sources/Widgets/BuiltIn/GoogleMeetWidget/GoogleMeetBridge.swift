@@ -13,6 +13,7 @@ import os.log
 nonisolated class GoogleMeetBridge: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "GoogleMeetBridge")
+    private let debugLog = DebugLogger(category: "GoogleMeetBridge")
 
     /// Serial queue for all AppleScript execution. NSAppleScript is not thread-safe
     /// and requires consistent thread affinity for AppleEvent dispatch. Shared with
@@ -162,7 +163,7 @@ nonisolated class GoogleMeetBridge: @unchecked Sendable {
 
             if let error = errorDict {
                 let errorNumber = error["NSAppleScriptErrorNumber"] as? Int ?? 0
-                logger.debug("AppleScript error \(errorNumber): \(error)")
+                debugLog.debug("AppleScript error \(errorNumber): \(error)")
                 return (nil, errorNumber)
             }
 

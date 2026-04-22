@@ -40,6 +40,7 @@ struct HomeAssistantWidgetView: View {
     let configStore: WidgetConfigStore
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "HomeAssistantWidget")
+    private let debugLog = DebugLogger(category: "HomeAssistantWidget")
 
     @State private var config = HomeAssistantWidget.Config()
     @State private var client = HomeAssistantClient()
@@ -251,10 +252,10 @@ struct HomeAssistantWidgetView: View {
             client.serverURL = config.serverURL
             client.accessToken = config.accessToken
             isConfigured = client.isConfigured
-            logger.debug("Loaded config: serverURL='\(config.serverURL)', entities=\(config.entityIDs), isConfigured=\(isConfigured)")
+            debugLog.debug("Loaded config: serverURL='\(config.serverURL)', entities=\(config.entityIDs), isConfigured=\(isConfigured)")
         } else {
             isConfigured = false
-            logger.debug("No saved config for instance \(instanceID.uuidString)")
+            debugLog.debug("No saved config for instance \(instanceID.uuidString)")
         }
     }
 }

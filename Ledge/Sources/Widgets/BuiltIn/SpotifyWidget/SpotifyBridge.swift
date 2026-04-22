@@ -12,6 +12,7 @@ import os.log
 nonisolated class SpotifyBridge: @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "SpotifyBridge")
+    private let debugLog = DebugLogger(category: "SpotifyBridge")
 
     /// Serial queue for all AppleScript execution. NSAppleScript is not thread-safe
     /// and requires consistent thread affinity for AppleEvent dispatch. Shared with
@@ -149,7 +150,7 @@ nonisolated class SpotifyBridge: @unchecked Sendable {
             guard let script = NSAppleScript(source: source) else { return nil }
             let result = script.executeAndReturnError(&error)
             if let error {
-                logger.debug("AppleScript error: \(error)")
+                debugLog.debug("AppleScript error: \(error)")
                 return nil
             }
             return result.stringValue
@@ -158,12 +159,12 @@ nonisolated class SpotifyBridge: @unchecked Sendable {
 
     /// Fire-and-forget AppleScript on the serial script queue.
     private func runAppleScriptFire(_ source: String) {
-        scriptQueue.async { [logger] in
+        scriptQueue.async { [debugLog] in
             var error: NSDictionary?
             guard let script = NSAppleScript(source: source) else { return }
             script.executeAndReturnError(&error)
             if let error {
-                logger.debug("AppleScript fire error: \(error)")
+                debugLog.debug("AppleScript fire error: \(error)")
             }
         }
     }

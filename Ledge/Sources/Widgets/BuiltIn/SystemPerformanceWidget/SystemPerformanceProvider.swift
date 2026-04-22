@@ -17,6 +17,7 @@ nonisolated class SystemPerformanceProvider: @unchecked Sendable {
     static let shared = SystemPerformanceProvider()
 
     private let logger = Logger(subsystem: "com.ledge.app", category: "SystemPerformance")
+    private let debugLog = DebugLogger(category: "SystemPerformance")
 
     struct Metrics: Sendable {
         var cpuUsage: Double = 0        // 0-100%
@@ -91,7 +92,7 @@ nonisolated class SystemPerformanceProvider: @unchecked Sendable {
         )
 
         guard result == KERN_SUCCESS, let info = cpuInfo else {
-            logger.debug("Failed to get CPU info: \(result)")
+            debugLog.debug("Failed to get CPU info: \(result)")
             return 0
         }
 
@@ -139,7 +140,7 @@ nonisolated class SystemPerformanceProvider: @unchecked Sendable {
         }
 
         guard result == KERN_SUCCESS else {
-            logger.debug("Failed to get memory info: \(result)")
+            debugLog.debug("Failed to get memory info: \(result)")
             return (0, totalGB, 0)
         }
 
