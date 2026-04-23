@@ -230,6 +230,34 @@ class DisplayManager: ObservableObject {
     /// Timer polling for Accessibility permission before fullscreen.
     private var accessibilityGateTimer: Timer?
 
+    // MARK: - Display-Change Debounce
+    //
+    // A single user action (toggle fullscreen, Hide/Show Panel, sleep/wake)
+    // produces 4-6 `didChangeScreenParametersNotification` events in rapid
+    // succession. Without coalescing, each re-entry of `handleDisplayChange`
+    // independently decides to tear down and rebuild the fullscreen helper,
+    // which amplifies races between panel/helper lifecycle and produces
+    // stuck-black panels, orphaned helpers, and incorrect `isActive` state.
+    //
+    // Self-induced bursts (helper teardown → rebuild triggers more
+    // notifications) are expected — they coalesce into one final call
+    // after the topology settles, which is the desired behaviour.
+
+    /// Debounce window for coalescing display-change notifications.
+    /// Shorter than the ~300-500 ms bursts produced by fullscreen
+    /// transitions so that legitimate rapid reconfigurations (plug in
+    /// then out within ~150 ms) still get handled reasonably.
+    private static let displayChangeDebounceMs = 150
+
+    /// Pending debounced invocation of `handleDisplayChange`. Cancelled
+    /// and replaced on each incoming notification — only the final one
+    /// executes.
+    private var pendingDisplayChange: DispatchWorkItem?
+
+    /// Number of notifications coalesced into the currently-pending
+    /// invocation. Reset to zero once `handleDisplayChange` runs.
+    private var coalescedDisplayChangeCount: Int = 0
+
     /// Invoked every time `showPanel()` creates a new `LedgePanel` instance.
     ///
     /// AppDelegate wires this to re-attach the dashboard content view and
@@ -498,7 +526,8 @@ class DisplayManager: ObservableObject {
     // MARK: - Display Change Notifications
 
     private func registerForDisplayChanges() {
-        // Watch for screen configuration changes (connect/disconnect/rearrange)
+        // Watch for screen configuration changes (connect/disconnect/rearrange).
+        // Notifications arrive in bursts — see the debounce note above.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -506,13 +535,36 @@ class DisplayManager: ObservableObject {
         ) { [weak self] _ in
             // Hop back to MainActor to satisfy Swift 6 concurrency
             Task { @MainActor [weak self] in
-                self?.handleDisplayChange()
+                self?.scheduleDisplayChange()
             }
         }
     }
 
-    private func handleDisplayChange() {
-        logger.info("Display configuration changed, re-scanning...")
+    /// Coalesce bursts of `didChangeScreenParametersNotification` into a
+    /// single `handleDisplayChange` invocation once the burst settles.
+    ///
+    /// `DispatchWorkItem` over `Timer` is deliberate — reliable across
+    /// run-loop modes and does not retain `self` via the block.
+    private func scheduleDisplayChange() {
+        coalescedDisplayChangeCount += 1
+        pendingDisplayChange?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let coalesced = self.coalescedDisplayChangeCount
+            self.coalescedDisplayChangeCount = 0
+            self.pendingDisplayChange = nil
+            self.handleDisplayChange(coalescedEvents: coalesced)
+        }
+        pendingDisplayChange = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(Self.displayChangeDebounceMs),
+            execute: work
+        )
+    }
+
+    private func handleDisplayChange(coalescedEvents: Int = 1) {
+        logger.info("Display configuration changed (coalesced \(coalescedEvents, privacy: .public) events), re-scanning...")
         logSnapshot("handleDisplayChange-entry")
 
         let previousScreen = xeneonScreen
