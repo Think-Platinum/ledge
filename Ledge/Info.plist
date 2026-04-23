@@ -17,5 +17,10 @@
 	<string>Ledge communicates with Google Chrome to control Google Meet meetings.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Ledge connects to Home Assistant and other services running on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+		<string>_https._tcp</string>
+	</array>
 </dict>
 </plist>
