@@ -120,6 +120,18 @@ class DisplayManager: ObservableObject {
     /// Info about the most recent touch event (for debug overlay).
     @Published private(set) var lastTouchInfo: TouchEventInfo? = nil
 
+    /// Number of times the IOKit registry IDs reported by `HIDTouchDetector`
+    /// have changed since the touch remapper started. Edge re-enumerations
+    /// across sleep/wake bump this — see `refreshTouchDeviceIDs(reason:)`.
+    @Published private(set) var deviceIDChangeCount: Int = 0
+
+    /// Timestamp of the most recent device-ID change, if any.
+    @Published private(set) var lastDeviceIDChangeAt: Date? = nil
+
+    /// Why the most recent device-ID refresh fired (e.g. `"system woke"`,
+    /// `"periodic"`, `"user"`). Only set when the IDs actually changed.
+    @Published private(set) var lastDeviceIDChangeReason: String? = nil
+
     /// Derived status string for the settings UI.
     var touchStatus: String {
         switch accessibilityPermission {
@@ -229,6 +241,18 @@ class DisplayManager: ObservableObject {
     private var accessibilityPermissionCompletion: (() -> Void)?
     /// Timer polling for Accessibility permission before fullscreen.
     private var accessibilityGateTimer: Timer?
+
+    /// Periodic safety-net timer that calls `refreshTouchDeviceIDs(reason:)`
+    /// while the remapper is active. Catches Edge re-enumerations that happen
+    /// without a wake / display-change notification (some unplug-replug cases,
+    /// USB hub flaps). Started by `proceedWithTouchRemapper`, stopped by
+    /// `stopTouchRemapper`.
+    private var deviceIDRefreshTimer: Timer?
+
+    /// Periodic device-ID refresh interval. 60 s is a deliberate balance:
+    /// short enough that a missed wake notification still self-heals within a
+    /// minute, long enough that the IOKit enumeration cost is negligible.
+    private static let deviceIDRefreshInterval: TimeInterval = 60.0
 
     // MARK: - Display-Change Debounce
     //
@@ -584,6 +608,12 @@ class DisplayManager: ObservableObject {
                 hidTouchReader.updatePanelFrame(currentScreen.frame)
                 mouseGuard.updateEdgeScreen(currentScreen)
 
+                // Display-topology changes (attach/detach of any monitor)
+                // can cause the Edge to re-enumerate too — not just sleep.
+                // Refresh the touch device IDs so the filter doesn't go
+                // stale silently.
+                refreshTouchDeviceIDs(reason: "display change")
+
                 if panel == nil && wasActive {
                     // Transient disconnect (sleep/wake, cable flap) destroyed
                     // the panel — but the user wanted it visible. Restore it.
@@ -705,6 +735,7 @@ class DisplayManager: ObservableObject {
         touchWatchdog.stop()
         mouseGuard.stop()
         tearDownPermissionPolling()
+        stopDeviceIDRefreshTimer()
         isTouchRemapperActive = false
         calibrationState = .notStarted
         learnedDeviceID = nil
@@ -905,9 +936,97 @@ class DisplayManager: ObservableObject {
             } else {
                 logger.info("Event tap active — use Settings to calibrate touch device")
             }
+
+            // Arm the periodic device-ID refresh as a safety net for
+            // re-enumerations that arrive without a wake/screen-change
+            // notification. Wake/display-change traps still do the prompt
+            // self-heal; this just bounds the worst case.
+            startDeviceIDRefreshTimer()
         } else {
             logger.error("Event tap failed to start")
         }
+    }
+
+    // MARK: - Touch Device ID Refresh
+    //
+    // The Xeneon Edge re-enumerates on the USB bus across sleep/wake (and
+    // on some display reconfigurations). macOS hands fresh IOKit registry
+    // entry IDs to its IOService descendants. CGEvent field 87 reports
+    // those IDs, so the cached `touchRemapper.touchDeviceIDs` set goes
+    // stale and every touch event silently passes through unmodified.
+    //
+    // The CGEventTap is healthy and the events are flowing — they just
+    // don't match the filter — so neither the tap-disabled paths nor
+    // `TouchWatchdog`'s heartbeat (which only fires after the filter
+    // passes) catch this. The refresh below is the targeted fix: re-run
+    // IOKit enumeration, diff against the current set, swap in-place.
+    // No tap teardown.
+
+    /// Re-enumerate the Edge via IOKit and update `touchRemapper.touchDeviceIDs`
+    /// in place if the set has changed. Lightweight — safe to call frequently
+    /// (called from wake / display-change traps and a 60s timer).
+    ///
+    /// On a real change: bumps `deviceIDChangeCount`, sets
+    /// `lastDeviceIDChangeAt` / `lastDeviceIDChangeReason`, and writes a
+    /// single `notice`-level log entry with old + new sets. On no change:
+    /// silent (avoid log spam from the periodic timer).
+    ///
+    /// `reason` is for telemetry — typical values: `"system woke"`,
+    /// `"displays woke"`, `"display change"`, `"periodic"`, `"user"`.
+    func refreshTouchDeviceIDs(reason: String) {
+        guard !AppEnvironment.isTesting else { return }
+        guard isTouchRemapperActive else { return }
+
+        guard let result = hidDetector.detect() else {
+            // Common during transient disconnects — Edge briefly absent
+            // from IOKit. Don't touch the cached IDs; the next refresh
+            // will pick the device up when it re-appears.
+            logger.info("Device ID refresh (\(reason, privacy: .public)) — Edge not currently visible to IOKit")
+            return
+        }
+
+        let oldIDs = touchRemapper.touchDeviceIDs
+        let newIDs = result.allDeviceIDs
+
+        guard oldIDs != newIDs else { return }
+
+        touchRemapper.setTouchDeviceIDs(newIDs)
+        // Refresh the UI-facing learned ID — show the highest registry
+        // entry, matching the convention used at proceedWithTouchRemapper.
+        learnedDeviceID = newIDs.sorted().last
+        // If we'd previously fallen through to manual calibration mode,
+        // the auto-detect just succeeded again — reflect that.
+        calibrationState = .autoDetected
+
+        deviceIDChangeCount += 1
+        lastDeviceIDChangeAt = Date()
+        lastDeviceIDChangeReason = reason
+
+        logger.notice("Touch device IDs refreshed (reason=\(reason, privacy: .public), change #\(self.deviceIDChangeCount, privacy: .public)) old=\(oldIDs.sorted(), privacy: .public) new=\(newIDs.sorted(), privacy: .public)")
+
+        // The mouse guard's filter set must track the touch IDs too,
+        // otherwise it'd let a re-enumerated touch through as a mouse.
+        updateMouseGuardState()
+    }
+
+    /// Start the periodic device-ID refresh timer. Idempotent.
+    private func startDeviceIDRefreshTimer() {
+        guard deviceIDRefreshTimer == nil else { return }
+        deviceIDRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.deviceIDRefreshInterval,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshTouchDeviceIDs(reason: "periodic")
+            }
+        }
+        logger.info("Device ID refresh timer armed (every \(Int(Self.deviceIDRefreshInterval), privacy: .public)s)")
+    }
+
+    /// Stop the periodic device-ID refresh timer. Idempotent.
+    private func stopDeviceIDRefreshTimer() {
+        deviceIDRefreshTimer?.invalidate()
+        deviceIDRefreshTimer = nil
     }
 
     // MARK: - HID Touch Reader Management
@@ -1344,6 +1463,9 @@ class DisplayManager: ObservableObject {
                 Task { @MainActor [weak self] in
                     self?.securityEventCounts.screensDidWake += 1
                     self?.unblankDisplay(reason: "displays woke")
+                    // Edge often re-enumerates across a screen-sleep — refresh
+                    // the touch device IDs so post-wake events match the filter.
+                    self?.refreshTouchDeviceIDs(reason: "displays woke")
                 }
             }
         )
@@ -1367,6 +1489,10 @@ class DisplayManager: ObservableObject {
                 Task { @MainActor [weak self] in
                     self?.securityEventCounts.didWake += 1
                     self?.unblankDisplay(reason: "system woke")
+                    // System sleep also re-enumerates the Edge — refresh now,
+                    // not 60s later, so touch is restored before the user
+                    // notices it dropped.
+                    self?.refreshTouchDeviceIDs(reason: "system woke")
                 }
             }
         )

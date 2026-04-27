@@ -104,6 +104,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
             self.observeSettingsWindow()
+            self.hideSettingsWindowOnLaunch()
+        }
+    }
+
+    /// SwiftUI auto-shows the `Window("Ledge Settings")` scene at launch.
+    /// We don't want it on first run — the menu-bar icon is the only entry
+    /// point. `observeSettingsWindow` has already pinned the window with
+    /// `isReleasedWhenClosed = false` so `showSettings()` can re-open it
+    /// without SwiftUI rebuilding the scene from scratch.
+    ///
+    /// Async-dispatched because SwiftUI may not have created the window
+    /// yet at the moment `applicationDidFinishLaunching` fires.
+    private func hideSettingsWindowOnLaunch() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            if let window = self.findSettingsWindow() {
+                window.isReleasedWhenClosed = false
+                // orderOut keeps the NSWindow alive so showSettings() can
+                // re-front it; close() would tear it down on some SwiftUI
+                // builds even with isReleasedWhenClosed=false.
+                window.orderOut(nil)
+                self.logger.info("Settings window hidden on launch")
+                return
+            }
+            // SwiftUI hasn't materialised it yet — try once more.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, let window = self.findSettingsWindow() else { return }
+                window.isReleasedWhenClosed = false
+                window.orderOut(nil)
+                self.logger.info("Settings window hidden on launch (delayed find)")
+            }
         }
     }
 

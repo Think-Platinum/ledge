@@ -108,6 +108,22 @@ struct DisplaySettingsView: View {
                     }
                 }
 
+                if displayManager.deviceIDChangeCount > 0 {
+                    LabeledContent("ID changes since launch") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("\(displayManager.deviceIDChangeCount)")
+                                .font(.caption.monospaced())
+                            if let at = displayManager.lastDeviceIDChangeAt,
+                               let why = displayManager.lastDeviceIDChangeReason {
+                                Text("last: \(why) — \(at.formatted(date: .omitted, time: .standard))")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .help("How often the Xeneon Edge has been issued new IOKit registry IDs since launch — usually one per sleep/wake. Auto-recovered without user intervention.")
+                }
+
                 Text("macOS maps the Xeneon Edge touchscreen to the primary display. The touch remapper auto-detects the touchscreen via USB and redirects input to the correct screen.")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -125,10 +141,9 @@ struct DisplaySettingsView: View {
                         .help("Touch the Xeneon Edge screen to identify the touchscreen device")
                     } else {
                         Button("Re-detect Device") {
-                            displayManager.stopTouchRemapper()
-                            displayManager.startTouchRemapper()
+                            displayManager.refreshTouchDeviceIDs(reason: "user")
                         }
-                        .help("Re-run IOKit HID detection for the touchscreen device")
+                        .help("Re-run IOKit HID detection and update the touch device ID filter — without tearing down the event tap. The app does this automatically on wake and on display changes; this button is for manual override.")
                     }
 
                     Button("Disable Touch Remapping") {
