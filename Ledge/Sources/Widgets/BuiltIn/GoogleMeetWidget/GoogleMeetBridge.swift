@@ -156,7 +156,10 @@ nonisolated class GoogleMeetBridge: @unchecked Sendable {
     /// Execute AppleScript synchronously on the shared serial script queue.
     /// All NSAppleScript usage goes through the same queue for thread safety.
     private func runAppleScriptWithError(_ source: String) -> (String?, Int) {
-        scriptQueue.sync { [logger] in
+        // No `[logger]` capture — closure body uses the per-widget `debugLog`
+        // filter, not the raw os.log Logger. Capturing `logger` was leftover
+        // from before the debug-log refactor.
+        scriptQueue.sync {
             let appleScript = NSAppleScript(source: source)
             var errorDict: NSDictionary?
             let result = appleScript?.executeAndReturnError(&errorDict)

@@ -61,16 +61,37 @@ EOF
     exit 1
 fi
 
-# Advisory — the cert might exist but lack the codeSigning EKU. Warn and
-# let xcodebuild decide. If this becomes a hard failure, run:
-#   security find-identity -v -p codesigning
-# and compare with:
-#   security find-identity -v
-# The first list is what Apple considers codesign-valid; the second is
-# every identity with a private key.
-if ! security find-identity -v -p codesigning | grep -qF "\"$SIGN_IDENTITY\""; then
-    echo "warning: \"$SIGN_IDENTITY\" exists but is not listed as codesigning-valid." >&2
-    echo "         Attempting build anyway — xcodebuild will error out if this fails." >&2
+# Functional check — try a real codesign with the identity against a
+# throwaway binary. This is more reliable than `security find-identity
+# -v -p codesigning`, which only checks for the codeSigning EKU bit.
+# Keychain Access's "Self Signed Root" wizard doesn't always set that
+# bit even when "Code Signing" is selected, so the EKU check produces
+# a false-positive warning on every build for many valid setups.
+#
+# A test sign exercises the actual signing pipeline xcodebuild will use,
+# so if it succeeds we know the build will succeed too.
+SIGN_TEST_DIR=$(mktemp -d)
+trap 'rm -rf "$SIGN_TEST_DIR"' EXIT
+SIGN_TEST_BIN="$SIGN_TEST_DIR/probe"
+# A 1-byte file is not signable — codesign needs a Mach-O. Copy /usr/bin/true,
+# which is a real Mach-O small enough to sign in milliseconds. (`/bin/true`
+# was removed in recent macOS versions; `/usr/bin/true` is the canonical path.)
+cp /usr/bin/true "$SIGN_TEST_BIN"
+chmod +w "$SIGN_TEST_BIN"
+if ! SIGN_TEST_OUTPUT=$(codesign --force --sign "$SIGN_IDENTITY" "$SIGN_TEST_BIN" 2>&1); then
+    cat <<EOF >&2
+error: signing identity "$SIGN_IDENTITY" failed a test sign.
+
+codesign output:
+$SIGN_TEST_OUTPUT
+
+The certificate exists in the keychain but cannot actually sign code.
+Common causes:
+  - Private key was not imported alongside the cert.
+  - The cert has expired.
+  - Keychain is locked (try opening Keychain Access and unlocking 'login').
+EOF
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -87,10 +108,16 @@ sleep 0.5
 # ---------------------------------------------------------------------------
 
 echo "→ Building ${CONFIGURATION} with identity: ${SIGN_IDENTITY}…"
+# `-destination 'generic/platform=macOS'` avoids the "Using the first of
+# multiple matching destinations" warning that fires on Apple Silicon
+# (where the local Mac is registered as both arm64 and x86_64). Generic
+# destination tells xcodebuild we don't care which slice — it'll build
+# both arches per ARCHS_STANDARD anyway.
 xcodebuild \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
     -configuration "$CONFIGURATION" \
+    -destination 'generic/platform=macOS' \
     -derivedDataPath "$BUILD_DIR" \
     CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
     CODE_SIGN_STYLE=Manual \
