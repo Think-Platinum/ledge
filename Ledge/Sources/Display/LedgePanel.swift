@@ -54,7 +54,13 @@ class LedgePanel: NSPanel {
         ) { [weak self] _ in
             guard let self else { return }
             let name = self.screen?.localizedName ?? "nil"
-            self.logger.warning("Panel changed screen → \(name, privacy: .public) frame=\(NSStringFromRect(self.frame), privacy: .public)")
+            // Log enough context to correlate with DisplayManager's snapshots:
+            // panel frame, isVisible, contentView.isHidden, and the screen's
+            // own frame so we can tell whether AppKit moved the panel or the
+            // screen's coordinate space shifted underneath us.
+            let screenFrame = self.screen.map { NSStringFromRect($0.frame) } ?? "nil"
+            let hidden = self.contentView?.isHidden ?? false
+            self.logger.warning("Panel changed screen → \(name, privacy: .public) | panel.frame=\(NSStringFromRect(self.frame), privacy: .public) panel.isVisible=\(self.isVisible, privacy: .public) contentHidden=\(hidden, privacy: .public) screenFrame=\(screenFrame, privacy: .public)")
         }
     }
 

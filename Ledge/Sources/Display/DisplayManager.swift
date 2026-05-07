@@ -559,7 +559,18 @@ class DisplayManager: ObservableObject {
         ) { [weak self] _ in
             // Hop back to MainActor to satisfy Swift 6 concurrency
             Task { @MainActor [weak self] in
-                self?.scheduleDisplayChange()
+                guard let self else { return }
+                // Diagnostic: log every RAW notification before the debounce
+                // collapses bursts. Lets us prove whether a wake actually
+                // produces a screen-parameters notification at all, and how
+                // many it produces in a burst.
+                let allScreens = NSScreen.screens.map { s -> String in
+                    let id = s.displayID.map(String.init) ?? "?"
+                    return "\(s.localizedName)#\(id)@\(NSStringFromRect(s.frame))"
+                }.joined(separator: " | ")
+                self.logger.notice("RAW didChangeScreenParameters fired — screens=[\(allScreens, privacy: .public)]")
+                self.logSnapshot("rawScreenChange")
+                self.scheduleDisplayChange()
             }
         }
     }
@@ -592,7 +603,27 @@ class DisplayManager: ObservableObject {
         logSnapshot("handleDisplayChange-entry")
 
         let previousScreen = xeneonScreen
+        let previousFrame = previousScreen?.frame
+        let previousDisplayID = previousScreen?.displayID
+        let previousIdentity = previousScreen.map { ObjectIdentifier($0).hashValue }
+
         detectXenonEdge()
+
+        // Diagnostic — emit BEFORE we branch so the log records exactly what
+        // changed (or didn't) between previous and current Edge state. Three
+        // independent change axes:
+        //   - identity:  NSScreen pointer reused vs new instance
+        //   - frame:     global-coordinate frame shifted (topology)
+        //   - displayID: physical display swapped (CGDirectDisplayID)
+        // Today's branch only fires on identity change — so if frame or
+        // displayID change without identity changing, we silently no-op.
+        let currentFrame = xeneonScreen?.frame
+        let currentDisplayID = xeneonScreen?.displayID
+        let currentIdentity = xeneonScreen.map { ObjectIdentifier($0).hashValue }
+        let identityChanged = currentIdentity != previousIdentity
+        let frameChanged    = currentFrame != previousFrame
+        let displayIDChanged = currentDisplayID != previousDisplayID
+        logger.notice("handleDisplayChange diff: identity changed=\(identityChanged, privacy: .public) (\(previousIdentity.map(String.init) ?? "nil", privacy: .public)→\(currentIdentity.map(String.init) ?? "nil", privacy: .public)) | frame changed=\(frameChanged, privacy: .public) (\(previousFrame.map(NSStringFromRect) ?? "nil", privacy: .public)→\(currentFrame.map(NSStringFromRect) ?? "nil", privacy: .public)) | displayID changed=\(displayIDChanged, privacy: .public) (\(previousDisplayID.map(String.init) ?? "nil", privacy: .public)→\(currentDisplayID.map(String.init) ?? "nil", privacy: .public))")
 
         if let currentScreen = xeneonScreen {
             if currentScreen != previousScreen {
@@ -1453,19 +1484,26 @@ class DisplayManager: ObservableObject {
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.securityEventCounts.screensDidSleep += 1
-                    self?.blankDisplay(reason: "displays slept")
+                    guard let self else { return }
+                    self.securityEventCounts.screensDidSleep += 1
+                    self.logSnapshot("screensDidSleep-entry")
+                    self.blankDisplay(reason: "displays slept")
+                    self.logSnapshot("screensDidSleep-exit")
                 }
             }
         )
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.securityEventCounts.screensDidWake += 1
-                    self?.unblankDisplay(reason: "displays woke")
+                    guard let self else { return }
+                    self.securityEventCounts.screensDidWake += 1
+                    self.logSnapshot("screensDidWake-entry")
+                    self.unblankDisplay(reason: "displays woke")
                     // Edge often re-enumerates across a screen-sleep — refresh
                     // the touch device IDs so post-wake events match the filter.
-                    self?.refreshTouchDeviceIDs(reason: "displays woke")
+                    self.refreshTouchDeviceIDs(reason: "displays woke")
+                    self.logSnapshot("screensDidWake-exit")
+                    self.scheduleWakeDiagnosticSnapshots(source: "screensDidWake")
                 }
             }
         )
@@ -1474,8 +1512,11 @@ class DisplayManager: ObservableObject {
         securityObservers.append(
             ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.securityEventCounts.willSleep += 1
-                    self?.blankDisplay(reason: "system sleeping")
+                    guard let self else { return }
+                    self.securityEventCounts.willSleep += 1
+                    self.logSnapshot("willSleep-entry")
+                    self.blankDisplay(reason: "system sleeping")
+                    self.logSnapshot("willSleep-exit")
                 }
             }
         )
@@ -1487,12 +1528,16 @@ class DisplayManager: ObservableObject {
                 // here does not weaken security but does prevent the stuck-blank
                 // state when `screensDidWake` / `screenIsUnlocked` miss.
                 Task { @MainActor [weak self] in
-                    self?.securityEventCounts.didWake += 1
-                    self?.unblankDisplay(reason: "system woke")
+                    guard let self else { return }
+                    self.securityEventCounts.didWake += 1
+                    self.logSnapshot("didWake-entry")
+                    self.unblankDisplay(reason: "system woke")
                     // System sleep also re-enumerates the Edge — refresh now,
                     // not 60s later, so touch is restored before the user
                     // notices it dropped.
-                    self?.refreshTouchDeviceIDs(reason: "system woke")
+                    self.refreshTouchDeviceIDs(reason: "system woke")
+                    self.logSnapshot("didWake-exit")
+                    self.scheduleWakeDiagnosticSnapshots(source: "didWake")
                 }
             }
         )
@@ -1619,6 +1664,20 @@ class DisplayManager: ObservableObject {
     }
 
     // MARK: - Diagnostics
+
+    /// Schedule snapshots after a wake to catch state drift that occurs
+    /// without a corresponding `didChangeScreenParameters` notification.
+    /// If the panel ends up `isActive=false` at +2s with no `rawScreenChange`
+    /// log between wake and that point, the wake produced no display-change
+    /// notification at all — which means the existing auto-restore branch
+    /// in `handleDisplayChange` never gets a chance to run.
+    private func scheduleWakeDiagnosticSnapshots(source: String) {
+        for delay in [2.0, 5.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.logSnapshot("postWake+\(Int(delay))s(\(source))")
+            }
+        }
+    }
 
     /// Log a single-line snapshot of the panel / helper / screen state.
     ///
@@ -1830,5 +1889,17 @@ class DisplayManager: ObservableObject {
             let isXeneon = isXenonEdgeByResolution(screen) || isXenonEdgeByName(screen)
             return (name: screen.localizedName, resolution: resolution, isXenonEdge: isXeneon)
         }
+    }
+}
+
+// MARK: - NSScreen helpers
+
+extension NSScreen {
+    /// The CoreGraphics `CGDirectDisplayID` for this screen, if available.
+    /// Stable across NSScreen instance churn — same physical display gets
+    /// the same `displayID` even when AppKit hands out a fresh NSScreen
+    /// pointer. Used for diagnostic comparison alongside frame and identity.
+    var displayID: CGDirectDisplayID? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
     }
 }
