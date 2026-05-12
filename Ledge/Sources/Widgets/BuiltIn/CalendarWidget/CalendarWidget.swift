@@ -120,6 +120,14 @@ struct CalendarWidgetView: View {
             checkCurrentMeeting()
         }
         .onReceive(meetingCheckTimer) { _ in
+            // Re-fetch on every tick so toggling a calendar's visibility
+            // in Calendar.app propagates within ≤15s (#68 AC2).
+            // EventKit doesn't fire EKEventStoreChanged for visibility
+            // toggles — the disabled set lives outside the EventKit
+            // store (in com.apple.iCal's preferences) — so a periodic
+            // re-read is the only way to honour the user's curation
+            // without restarting Ledge.
+            eventManager.fetchEvents(daysAhead: config.daysToShow)
             checkCurrentMeeting()
         }
         .onReceive(configStore.configDidChange) { changedID in
