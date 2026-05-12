@@ -40,6 +40,7 @@ struct DeveloperSettingsView: View {
 
     var body: some View {
         Form {
+            buildSection
             permissionsSection
             touchPipelineSection
             displaySecuritySection
@@ -49,6 +50,58 @@ struct DeveloperSettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Developer")
+    }
+
+    // MARK: - Build Identity
+
+    /// Surfaces the compile-time `BuildInfo` constants so you can verify
+    /// "am I actually running what I just shipped?" without `lsof` /
+    /// `mdfind`. Stamped by `bin/ship` before each release build; reads
+    /// `"dev"` for Cmd+R-from-Xcode builds that skipped the ship script.
+    private var buildSection: some View {
+        Section("Build") {
+            LabeledContent("Commit") {
+                HStack(spacing: 6) {
+                    Text(BuildInfo.commit)
+                        .font(.caption.monospaced())
+                    if BuildInfo.workingTree == "DIRTY" {
+                        Text("DIRTY")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.orange)
+                    } else if BuildInfo.workingTree == "dev" {
+                        Text("dev build")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            LabeledContent("Built") {
+                Text(BuildInfo.builtAt)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            if !BuildInfo.signingIdentity.isEmpty {
+                LabeledContent("Signed") {
+                    Text(BuildInfo.signingIdentity)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Bundle path of the running process — distinct from the
+            // commit. If LaunchServices activated a stale install, this
+            // is how you spot it: the path won't be /Applications/Ledge.app.
+            LabeledContent("Bundle path") {
+                Text(Bundle.main.bundlePath)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
+                    .textSelection(.enabled)
+            }
+        }
     }
 
     // MARK: - Permissions

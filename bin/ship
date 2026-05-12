@@ -24,19 +24,21 @@ readonly BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
 readonly INSTALL_DIR="${INSTALL_DIR:-/Applications}"
 readonly APP_NAME="Ledge.app"
 readonly SIGN_IDENTITY="${LEDGE_SIGN_IDENTITY:-Ledge Dev}"
+readonly BUNDLE_ID="com.thinkplatinum.Ledge"
+readonly BUILD_INFO_FILE="$REPO_ROOT/Ledge/Sources/App/BuildInfo.swift"
 
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# 1. Verify signing identity exists
+# 1. Verify signing identity exists and can actually sign
 # ---------------------------------------------------------------------------
 #
 # We check by certificate name, not codesigning-policy match. The
 # `-p codesigning` filter requires the cert's Extended Key Usage (EKU)
 # extension to include `codeSigning`, which Keychain Access's "Self Signed
 # Root" wizard doesn't always set even when you pick "Code Signing" as
-# cert type. Presence + private key is enough — if the cert isn't
-# actually usable for signing, xcodebuild will fail with a clear error.
+# cert type. Presence + private key is enough — but we also do a real
+# test sign below to catch broken keychains / expired certs early.
 
 if ! security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
     cat <<EOF >&2
@@ -62,20 +64,12 @@ EOF
 fi
 
 # Functional check — try a real codesign with the identity against a
-# throwaway binary. This is more reliable than `security find-identity
-# -v -p codesigning`, which only checks for the codeSigning EKU bit.
-# Keychain Access's "Self Signed Root" wizard doesn't always set that
-# bit even when "Code Signing" is selected, so the EKU check produces
-# a false-positive warning on every build for many valid setups.
-#
-# A test sign exercises the actual signing pipeline xcodebuild will use,
-# so if it succeeds we know the build will succeed too.
+# throwaway binary. More reliable than `security find-identity -v -p
+# codesigning`, which only checks for the codeSigning EKU bit (often
+# missing from Keychain Access's Self-Signed Root certs).
 SIGN_TEST_DIR=$(mktemp -d)
-trap 'rm -rf "$SIGN_TEST_DIR"' EXIT
+trap 'rm -rf "$SIGN_TEST_DIR" 2>/dev/null || true' EXIT
 SIGN_TEST_BIN="$SIGN_TEST_DIR/probe"
-# A 1-byte file is not signable — codesign needs a Mach-O. Copy /usr/bin/true,
-# which is a real Mach-O small enough to sign in milliseconds. (`/bin/true`
-# was removed in recent macOS versions; `/usr/bin/true` is the canonical path.)
 cp /usr/bin/true "$SIGN_TEST_BIN"
 chmod +w "$SIGN_TEST_BIN"
 if ! SIGN_TEST_OUTPUT=$(codesign --force --sign "$SIGN_IDENTITY" "$SIGN_TEST_BIN" 2>&1); then
@@ -95,24 +89,149 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Quit running Ledge
+# 2. Compute build identity (so we can stamp BuildInfo.swift before build)
 # ---------------------------------------------------------------------------
 
-echo "→ Quitting running Ledge (if any)…"
-osascript -e 'tell application "Ledge" to quit' 2>/dev/null || true
-# Give it a moment to release files before we overwrite.
-sleep 0.5
+SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    DIRTY="DIRTY"
+else
+    DIRTY="clean"
+fi
+BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # ---------------------------------------------------------------------------
-# 3. Build Release
+# 3. Stamp BuildInfo.swift with real values (restored after build)
+# ---------------------------------------------------------------------------
+#
+# The placeholder BuildInfo.swift in source uses "dev" so Cmd+R from Xcode
+# still compiles. We overwrite it with real values for this build, then
+# `git checkout` it back at the end so the working tree stays clean.
+
+if [[ ! -f "$BUILD_INFO_FILE" ]]; then
+    echo "error: $BUILD_INFO_FILE not found — expected the placeholder source file" >&2
+    exit 1
+fi
+
+BUILD_INFO_BACKUP=$(mktemp)
+cp "$BUILD_INFO_FILE" "$BUILD_INFO_BACKUP"
+restore_build_info() {
+    # Restore from the byte-exact backup we took before stamping. More
+    # robust than `git checkout`, which fails for newly-added-but-not-yet-
+    # committed files and silently does nothing outside a work tree.
+    if [[ -f "$BUILD_INFO_BACKUP" ]]; then
+        cp "$BUILD_INFO_BACKUP" "$BUILD_INFO_FILE"
+        rm -f "$BUILD_INFO_BACKUP"
+    fi
+}
+trap 'restore_build_info; rm -rf "$SIGN_TEST_DIR" 2>/dev/null || true' EXIT
+
+# Rewrite the four constants in place. Using sed `-i ''` for in-place edit on
+# BSD sed (macOS). The patterns are tied to the exact line shape in the
+# placeholder file — if you change the placeholder, update these too.
+sed -i '' \
+    -e "s|static let commit: String = \".*\"|static let commit: String = \"${SHA}\"|" \
+    -e "s|static let builtAt: String = \".*\"|static let builtAt: String = \"${BUILT_AT}\"|" \
+    -e "s|static let workingTree: String = \".*\"|static let workingTree: String = \"${DIRTY}\"|" \
+    -e "s|static let signingIdentity: String = \".*\"|static let signingIdentity: String = \"${SIGN_IDENTITY}\"|" \
+    "$BUILD_INFO_FILE"
+
+# Sanity check — if sed didn't match, the build will still succeed but with
+# stale "dev" values, which defeats the purpose of stamping.
+if ! grep -qF "static let commit: String = \"${SHA}\"" "$BUILD_INFO_FILE"; then
+    echo "error: failed to stamp commit into $BUILD_INFO_FILE — sed pattern may be out of date" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Stop ALL running Ledge instances (escalate if needed)
+# ---------------------------------------------------------------------------
+#
+# Why this is involved: macOS LaunchServices won't launch a second instance
+# of an app by default. If we `open` the new binary while an old process is
+# still alive (same bundle ID), LaunchServices just activates the old PID
+# and you keep running stale code with no warning. So: quit cleanly, then
+# escalate to SIGTERM / SIGKILL by PID until nothing's left.
+
+kill_all_ledge() {
+    local pids
+    pids=$(pgrep -x Ledge 2>/dev/null || true)
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+    echo "→ Stopping running Ledge (PIDs: $(echo $pids | tr '\n' ' '))…"
+
+    # Polite quit first — gives applicationWillTerminate a chance to run.
+    osascript -e "tell application id \"$BUNDLE_ID\" to quit" 2>/dev/null || true
+    sleep 0.5
+
+    # Anything still alive after the AppleEvent quit gets SIGTERM.
+    pids=$(pgrep -x Ledge 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "  AppleEvent quit ignored; sending SIGTERM"
+        # shellcheck disable=SC2086
+        kill -TERM $pids 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    # Last resort — SIGKILL anything still hanging on.
+    pids=$(pgrep -x Ledge 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "  Still alive after SIGTERM; sending SIGKILL"
+        # shellcheck disable=SC2086
+        kill -KILL $pids 2>/dev/null || true
+        sleep 0.3
+    fi
+
+    pids=$(pgrep -x Ledge 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "error: could not stop Ledge — PIDs still running: $pids" >&2
+        return 1
+    fi
+}
+
+kill_all_ledge
+
+# ---------------------------------------------------------------------------
+# 5. Detect stale Ledge.app installs at non-canonical paths
+# ---------------------------------------------------------------------------
+#
+# Multiple .app bundles with the same bundle ID confuse LaunchServices: it
+# may pick the wrong one for `open`, or for permission grants. We surface
+# them so the user can decide whether to remove. Excludes DerivedData and
+# Xcode archives — those are expected.
+
+STALE_INSTALLS=$(mdfind 'kMDItemCFBundleIdentifier == "'"$BUNDLE_ID"'"' 2>/dev/null \
+    | grep -v -E '/(DerivedData|Archives|build)/' \
+    | grep -v -xF "$INSTALL_DIR/$APP_NAME" \
+    || true)
+
+if [[ -n "$STALE_INSTALLS" ]]; then
+    echo
+    echo "warning: found non-canonical Ledge.app install(s):" >&2
+    while IFS= read -r path; do
+        echo "  $path" >&2
+    done <<< "$STALE_INSTALLS"
+    cat <<EOF >&2
+
+LaunchServices may activate one of these instead of the canonical
+$INSTALL_DIR/$APP_NAME after this build. To avoid the wrong binary running:
+
+  rm -rf <path above>
+
+Continuing build — but if the launched app reports an unexpected commit
+at the end, this is why.
+EOF
+    echo
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Build Release
 # ---------------------------------------------------------------------------
 
-echo "→ Building ${CONFIGURATION} with identity: ${SIGN_IDENTITY}…"
+echo "→ Building ${CONFIGURATION} (commit ${SHA}, identity ${SIGN_IDENTITY})…"
 # `-destination 'generic/platform=macOS'` avoids the "Using the first of
-# multiple matching destinations" warning that fires on Apple Silicon
-# (where the local Mac is registered as both arm64 and x86_64). Generic
-# destination tells xcodebuild we don't care which slice — it'll build
-# both arches per ARCHS_STANDARD anyway.
+# multiple matching destinations" warning that fires on Apple Silicon.
 xcodebuild \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
@@ -131,34 +250,71 @@ if [[ ! -d "$APP_SOURCE" ]]; then
     exit 1
 fi
 
+# Restore BuildInfo.swift now that the build has captured the stamped
+# values into the compiled binary. The trap will also do this on early
+# exit, but doing it here makes the working tree clean before launch.
+restore_build_info
+
 # ---------------------------------------------------------------------------
-# 4. Install (ditto preserves signature metadata and xattrs)
+# 7. Install (ditto preserves signature metadata and xattrs)
 # ---------------------------------------------------------------------------
 
 echo "→ Installing to ${APP_DEST}…"
 if [[ -d "$APP_DEST" && ! -w "$APP_DEST" ]]; then
-    # Rare on admin Macs; fall back to sudo if /Applications is locked down.
     sudo ditto "$APP_SOURCE" "$APP_DEST"
 else
     ditto "$APP_SOURCE" "$APP_DEST"
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Launch and report build identity
+# 8. Launch and verify the running PID is our binary
 # ---------------------------------------------------------------------------
 
 echo "→ Launching Ledge…"
 open "$APP_DEST"
 
-SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
-DIRTY="clean"
-if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    DIRTY="DIRTY"
+# Give LaunchServices a moment to spawn the process. We'll then verify the
+# running PID is loaded from $APP_DEST and not some stale install path.
+sleep 0.7
+
+RUNNING_PID=$(pgrep -x Ledge 2>/dev/null | head -1 || true)
+LAUNCH_OK=true
+if [[ -z "$RUNNING_PID" ]]; then
+    echo "warning: open succeeded but no Ledge PID found — launch may have failed" >&2
+    LAUNCH_OK=false
+else
+    RUNNING_PATH=$(lsof -p "$RUNNING_PID" 2>/dev/null \
+        | awk '/Ledge\.app\/Contents\/MacOS\/Ledge$/ {print $NF; exit}')
+    EXPECTED_PATH="$APP_DEST/Contents/MacOS/Ledge"
+    if [[ "$RUNNING_PATH" != "$EXPECTED_PATH" ]]; then
+        cat <<EOF >&2
+warning: launched PID $RUNNING_PID is from
+  $RUNNING_PATH
+but expected
+  $EXPECTED_PATH
+
+LaunchServices probably activated a stale install. See the "non-canonical
+install(s)" warning earlier (if any), or run:
+  mdfind 'kMDItemCFBundleIdentifier == "$BUNDLE_ID"'
+EOF
+        LAUNCH_OK=false
+    fi
 fi
-BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# ---------------------------------------------------------------------------
+# 9. Final report
+# ---------------------------------------------------------------------------
 
 echo
 echo "  Shipped: $APP_DEST"
 echo "  Commit:  $SHA ($DIRTY)"
 echo "  Built:   $BUILT_AT UTC"
 echo "  Signed:  $SIGN_IDENTITY"
+if [[ -n "${RUNNING_PID:-}" ]]; then
+    echo "  PID:     $RUNNING_PID ($RUNNING_PATH)"
+fi
+if [[ "$LAUNCH_OK" != "true" ]]; then
+    echo
+    echo "  ⚠ Launch verification failed — the running app may not be this build." >&2
+    exit 2
+fi
