@@ -2037,13 +2037,20 @@ class DisplayManager: ObservableObject {
         //       Edge briefly sits at (0,0) before LG re-joins and shifts it
         //       to its real position).
         //
-        // Both axes are checked: AppKit's `NSScreen.main` and CoreGraphics'
-        // `CGMainDisplayID()`. They agree, but CG works even before AppKit
-        // finishes updating its screen list, which matters during topology
-        // transitions.
+        // Only `CGMainDisplayID()` is authoritative for "user's primary
+        // workspace" — it returns the display containing the menu bar,
+        // which is exactly what the user picks in System Settings → Displays.
+        //
+        // `NSScreen.main`, despite the name, is documented as "the screen
+        // containing the window with the keyboard focus." Once our own
+        // panel becomes key on the Edge, NSScreen.main returns the Edge,
+        // and a naive `isMainAppKit || isMainCG` check rejects the app off
+        // its own screen on the next display-change event — destroying the
+        // panel and never recovering. We compute it here purely for the
+        // diagnostic log line; the actual decision uses CG only.
         let isMainAppKit = (screen == NSScreen.main)
         let isMainCG = (screen.displayID == CGMainDisplayID())
-        if isMainAppKit || isMainCG {
+        if isMainCG {
             xeneonScreen = nil
             isActive = false
             statusMessage = "Detection rejected: candidate Edge is the main display. Ledge will not render on the user's primary workspace."
