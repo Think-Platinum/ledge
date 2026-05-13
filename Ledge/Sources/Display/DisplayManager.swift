@@ -392,6 +392,20 @@ class DisplayManager: ObservableObject {
                 }
             }
 
+            // Re-snap the panel onto the Edge if AppKit silently migrates it
+            // to another display during a topology shift. Architect-flagged
+            // recovery path — pairs with installHelperScreenObserver for the
+            // helper. Only the DisplayManager knows which screen *should*
+            // host the panel, so the panel just notifies us and we decide.
+            panel?.onScreenMigrated = { [weak self] newScreen in
+                guard let self, let edge = self.xeneonScreen else { return }
+                if newScreen?.displayID != edge.displayID {
+                    self.logger.warning("Panel migrated off Edge — re-snapping. panel.screen.displayID=\(newScreen?.displayID.map(String.init) ?? "nil", privacy: .public), xeneonScreen.displayID=\(edge.displayID.map(String.init) ?? "nil", privacy: .public)")
+                    self.panel?.reposition(on: edge)
+                    self.logSnapshot("panelMigrationRecovery")
+                }
+            }
+
             logger.notice("Created LedgePanel on Xeneon Edge")
 
             // A fresh panel has no contentView. Ask the owner (AppDelegate)

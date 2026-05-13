@@ -19,6 +19,17 @@ class LedgePanel: NSPanel {
     /// (e.g. when the Edge's NSScreen becomes invalid during sleep/wake).
     private var screenChangeObserver: Any?
 
+    /// Callback fired when AppKit silently migrates the panel to a different
+    /// screen. DisplayManager wires this at panel creation time so it can
+    /// re-snap the panel back onto the Edge if AppKit drifted it onto the
+    /// wrong display during a topology change.
+    ///
+    /// Receives the panel's *new* screen (or nil if it was orphaned). The
+    /// callback is responsible for comparing to `xeneonScreen` and deciding
+    /// whether action is needed — the panel itself doesn't know which screen
+    /// is the Edge.
+    var onScreenMigrated: ((NSScreen?) -> Void)?
+
     /// Creates a new LedgePanel covering the given screen.
     ///
     /// - Parameter screen: The NSScreen to display the panel on (should be the Xeneon Edge).
@@ -61,6 +72,13 @@ class LedgePanel: NSPanel {
             let screenFrame = self.screen.map { NSStringFromRect($0.frame) } ?? "nil"
             let hidden = self.contentView?.isHidden ?? false
             self.logger.warning("Panel changed screen → \(name, privacy: .public) | panel.frame=\(NSStringFromRect(self.frame), privacy: .public) panel.isVisible=\(self.isVisible, privacy: .public) contentHidden=\(hidden, privacy: .public) screenFrame=\(screenFrame, privacy: .public)")
+
+            // Notify DisplayManager so it can decide whether to re-snap the
+            // panel onto the Edge. DisplayManager is the only thing that
+            // knows which screen *should* host the panel — the panel itself
+            // can't make that call. Architect-flagged: this observer used to
+            // only log; now it actively triggers recovery.
+            self.onScreenMigrated?(self.screen)
         }
     }
 
