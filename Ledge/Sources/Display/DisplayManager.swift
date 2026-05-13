@@ -293,6 +293,28 @@ class DisplayManager: ObservableObject {
     /// transition completes, this is consulted and triggers the next rebuild.
     private var pendingRebuildDisplayID: CGDirectDisplayID?
 
+    /// Set true while a `CGDisplayBeginConfiguration` is in flight and
+    /// cleared on the matching completion callback. While set,
+    /// `handleDisplayChange` defers — `NSScreen.screens` may be stale
+    /// during the transition window, and acting on stale data is what
+    /// produced the wake bug (helper built at Edge@(0,0) just before
+    /// LG joined and Edge moved). Set/cleared on the main actor only.
+    private var isTopologyTransitioning: Bool = false
+
+    /// CoreGraphics reconfiguration callback. Defined as a property (not
+    /// inline) so the same function pointer can be passed to both
+    /// `CGDisplayRegisterReconfigurationCallback` and the matching
+    /// `CGDisplayRemoveReconfigurationCallback` in `deinit` — the OS uses
+    /// the callback pointer + userInfo as the lookup key for unregistration.
+    private let cgReconfigCallback: CGDisplayReconfigurationCallBack = { displayID, flags, userInfo in
+        guard let userInfo = userInfo else { return }
+        let dm = Unmanaged<DisplayManager>.fromOpaque(userInfo).takeUnretainedValue()
+        let flagsValue = flags.rawValue
+        Task { @MainActor in
+            dm.handleCGDisplayReconfiguration(displayID: displayID, rawFlags: flagsValue)
+        }
+    }
+
     /// Periodic device-ID refresh interval. 60 s is a deliberate balance:
     /// short enough that a missed wake notification still self-heals within a
     /// minute, long enough that the IOKit enumeration cost is negligible.
@@ -349,6 +371,13 @@ class DisplayManager: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             DistributedNotificationCenter.default().removeObserver(observer)
         }
+        // Match the CGDisplayRegisterReconfigurationCallback in
+        // registerForDisplayChanges. The OS uses (callback, userInfo) as
+        // the lookup key for unregistration. We're allowed to compute
+        // Unmanaged.passUnretained(self).toOpaque() inside deinit because
+        // `passUnretained` doesn't touch the reference count.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        CGDisplayRemoveReconfigurationCallback(cgReconfigCallback, context)
     }
 
     // MARK: - Display Detection
@@ -608,6 +637,37 @@ class DisplayManager: ObservableObject {
     // MARK: - Display Change Notifications
 
     private func registerForDisplayChanges() {
+        // CoreGraphics-level reconfiguration callback — architect-flagged.
+        //
+        // Fires DURING topology reconfiguration (not after, like
+        // didChangeScreenParametersNotification), with per-display flags
+        // telling us exactly what's happening:
+        //
+        //   kCGDisplayBeginConfigurationFlag — reconfiguration starting;
+        //       NSScreen.screens may still hold stale data. Set our
+        //       isTopologyTransitioning flag so handleDisplayChange refuses
+        //       to act on intermediate state.
+        //   (zero flags after kCGDisplayBeginConfigurationFlag)
+        //       — reconfiguration complete; clear the flag and trigger a
+        //       fresh handleDisplayChange.
+        //   kCGDisplayMovedFlag — display's frame.origin changed (the
+        //       "Edge moved from (0,0) to (548,-720)" signal we couldn't
+        //       see before). Logged for diagnostics.
+        //   kCGDisplayAddFlag / kCGDisplayRemoveFlag — display attached/
+        //       detached. Logged.
+        //   kCGDisplayDesktopShapeChangedFlag — overall desktop bounds
+        //       changed. Logged.
+        //
+        // Threading: callback fires on a private CG thread, NOT the main
+        // thread. The Task @MainActor hop is mandatory.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let status = CGDisplayRegisterReconfigurationCallback(cgReconfigCallback, context)
+        if status == .success {
+            logger.info("CGDisplay reconfiguration callback registered")
+        } else {
+            logger.error("CGDisplayRegisterReconfigurationCallback returned \(status.rawValue, privacy: .public) — falling back to NSApplication notifications only")
+        }
+
         // Watch for screen configuration changes (connect/disconnect/rearrange).
         // Notifications arrive in bursts — see the debounce note above.
         NotificationCenter.default.addObserver(
@@ -630,6 +690,47 @@ class DisplayManager: ObservableObject {
                 self.logSnapshot("rawScreenChange")
                 self.scheduleDisplayChange()
             }
+        }
+    }
+
+    /// Process a CoreGraphics display reconfiguration callback (architect-
+    /// flagged early signal). See `registerForDisplayChanges` for context.
+    ///
+    /// The flag set determines what we do:
+    ///   - `kCGDisplayBeginConfigurationFlag` present → reconfiguration is
+    ///     starting, set `isTopologyTransitioning = true` so handleDisplay-
+    ///     Change refuses to act on intermediate state.
+    ///   - flags with NO `kCGDisplayBeginConfigurationFlag` → reconfiguration
+    ///     for this display is complete. Clear the flag and trigger a fresh
+    ///     handleDisplayChange.
+    func handleCGDisplayReconfiguration(displayID: CGDirectDisplayID, rawFlags: UInt32) {
+        let flags = CGDisplayChangeSummaryFlags(rawValue: rawFlags)
+        let beginning = flags.contains(.beginConfigurationFlag)
+
+        // Build a human-readable description of the flags for the log.
+        var parts: [String] = []
+        if flags.contains(.addFlag) { parts.append("add") }
+        if flags.contains(.removeFlag) { parts.append("remove") }
+        if flags.contains(.movedFlag) { parts.append("moved") }
+        if flags.contains(.setMainFlag) { parts.append("setMain") }
+        if flags.contains(.setModeFlag) { parts.append("setMode") }
+        if flags.contains(.desktopShapeChangedFlag) { parts.append("desktopShape") }
+        if flags.contains(.enabledFlag) { parts.append("enabled") }
+        if flags.contains(.disabledFlag) { parts.append("disabled") }
+        if flags.contains(.mirrorFlag) { parts.append("mirror") }
+        if flags.contains(.unMirrorFlag) { parts.append("unmirror") }
+        let flagDesc = parts.isEmpty ? "none" : parts.joined(separator: "+")
+
+        if beginning {
+            isTopologyTransitioning = true
+            logger.notice("CG reconfig BEGIN — displayID=\(displayID, privacy: .public) flags=[\(flagDesc, privacy: .public)]")
+        } else {
+            isTopologyTransitioning = false
+            logger.notice("CG reconfig COMPLETE — displayID=\(displayID, privacy: .public) flags=[\(flagDesc, privacy: .public)]")
+            // Trigger a debounced handleDisplayChange so we re-evaluate
+            // topology with `NSScreen.screens` now in its post-transition
+            // state.
+            scheduleDisplayChange()
         }
     }
 
@@ -658,6 +759,19 @@ class DisplayManager: ObservableObject {
 
     private func handleDisplayChange(coalescedEvents: Int = 1) {
         logger.info("Display configuration changed (coalesced \(coalescedEvents, privacy: .public) events), re-scanning...")
+
+        // Architect-flagged: defer if a CG reconfiguration is in flight.
+        // NSScreen.screens may hold stale data during the transition window;
+        // acting on it produces the wake bug (helper built at Edge@(0,0)
+        // just before LG joined). The CG completion callback will fire
+        // scheduleDisplayChange() once the transition settles, so dropping
+        // this invocation is safe — we'll re-enter cleanly.
+        if isTopologyTransitioning {
+            logger.notice("handleDisplayChange deferred — CG reconfiguration in flight")
+            logSnapshot("handleDisplayChange-deferred")
+            return
+        }
+
         logSnapshot("handleDisplayChange-entry")
 
         let previousScreen = xeneonScreen
