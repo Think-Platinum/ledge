@@ -626,7 +626,23 @@ class DisplayManager: ObservableObject {
         logger.notice("handleDisplayChange diff: identity changed=\(identityChanged, privacy: .public) (\(previousIdentity.map(String.init) ?? "nil", privacy: .public)→\(currentIdentity.map(String.init) ?? "nil", privacy: .public)) | frame changed=\(frameChanged, privacy: .public) (\(previousFrame.map(NSStringFromRect) ?? "nil", privacy: .public)→\(currentFrame.map(NSStringFromRect) ?? "nil", privacy: .public)) | displayID changed=\(displayIDChanged, privacy: .public) (\(previousDisplayID.map(String.init) ?? "nil", privacy: .public)→\(currentDisplayID.map(String.init) ?? "nil", privacy: .public))")
 
         if let currentScreen = xeneonScreen {
-            if currentScreen != previousScreen {
+            // Topology comparison — three independent change axes (architect-flagged).
+            //
+            // The previous guard `currentScreen != previousScreen` only checked
+            // NSScreen *reference* identity, which silently no-ops the most
+            // common real-world case: the same NSScreen instance is reused but
+            // its `frame.origin` shifts because another display was attached/
+            // detached/rearranged. That's exactly what the Bug 2 wake log
+            // showed — Edge's frame went from (0,0) to (548,-720) without the
+            // displayID changing, while the NSScreen instance kept the same
+            // pointer on some passes and a new one on others.
+            //
+            // Treat ANY of (identity, frame, displayID) changing as a topology
+            // change worth acting on. False positives are cheap (a redundant
+            // panel reposition is harmless); false negatives cost the user a
+            // misaligned panel or an orphan helper on the wrong screen.
+            let topologyChanged = identityChanged || frameChanged || displayIDChanged
+            if topologyChanged {
                 // Screen changed (e.g., rearranged, or Edge returned after disconnect).
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
                 // Display topology changed — clear any stuck blanking so the
