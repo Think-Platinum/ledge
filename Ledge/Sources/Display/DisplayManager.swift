@@ -249,6 +249,13 @@ class DisplayManager: ObservableObject {
     /// `stopTouchRemapper`.
     private var deviceIDRefreshTimer: Timer?
 
+    /// Observer for `NSWindow.didChangeScreenNotification` on the fullscreen
+    /// helper. AppKit silently migrates the helper to a different display when
+    /// the topology shifts under it (the wake bug — helper created at Edge@(0,0)
+    /// gets stranded on LG when LG re-joins and Edge moves to (548,-720)).
+    /// Catches the migration in real time and triggers a sanity rebuild.
+    private var helperScreenObserver: Any?
+
     /// Periodic device-ID refresh interval. 60 s is a deliberate balance:
     /// short enough that a missed wake notification still self-heals within a
     /// minute, long enough that the IOKit enumeration cost is negligible.
@@ -1330,6 +1337,51 @@ class DisplayManager: ObservableObject {
 
     // MARK: - Fullscreen Helper (Menu Bar Hiding)
 
+    /// Watch for AppKit silently migrating the fullscreen helper to a different
+    /// display. This is the architect-flagged orphan-detection path.
+    ///
+    /// When the topology shifts under a window with `.fullScreenPrimary`
+    /// collection behaviour, AppKit may relocate it to a different screen
+    /// rather than dragging it to follow the original screen's new position.
+    /// In the wake-then-LG-rejoin reproduction, the helper was created at
+    /// Edge@(0,0), then LG joined and Edge moved to (548,-720), and the
+    /// helper ended up stranded inside LG's bounds — a black rectangle on
+    /// the user's main display.
+    ///
+    /// On migration: if the helper's new screen no longer matches
+    /// `xeneonScreen` (by `displayID`), tear down and rebuild via the normal
+    /// `handleDisplayChange` recovery path. Comparing by `displayID` rather
+    /// than NSScreen reference identity is intentional — same physical Edge
+    /// often gets a fresh NSScreen pointer across topology shifts.
+    private func installHelperScreenObserver(on helper: FullscreenHelperWindow) {
+        if let existing = helperScreenObserver {
+            NotificationCenter.default.removeObserver(existing)
+            helperScreenObserver = nil
+        }
+        helperScreenObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: helper,
+            queue: .main
+        ) { [weak self, weak helper] _ in
+            Task { @MainActor [weak self, weak helper] in
+                guard let self, let helper = helper else { return }
+                let helperDisplayID = helper.screen?.displayID
+                let edgeDisplayID = self.xeneonScreen?.displayID
+                if helperDisplayID != edgeDisplayID {
+                    self.logger.warning("Fullscreen helper migrated to wrong screen — helper.displayID=\(helperDisplayID.map(String.init) ?? "nil", privacy: .public), xeneonScreen.displayID=\(edgeDisplayID.map(String.init) ?? "nil", privacy: .public). Tearing down for rebuild.")
+                    self.logSnapshot("helperScreenMigration")
+                    self.tearDownFullscreenHelper()
+                    // Re-trigger the normal recovery path. handleDisplayChange
+                    // is debounced and idempotent — calling it directly here
+                    // (rather than waiting for a notification) closes the
+                    // window where the helper sits orphan with no event to
+                    // pull it back.
+                    self.scheduleDisplayChange()
+                }
+            }
+        }
+    }
+
     /// Create a helper window that enters native macOS fullscreen on the Edge display.
     ///
     /// When a window goes fullscreen on a secondary display, macOS creates a dedicated
@@ -1374,6 +1426,7 @@ class DisplayManager: ObservableObject {
         helper.setFrame(screen.frame, display: false)
 
         fullscreenHelper = helper
+        installHelperScreenObserver(on: helper)
 
         // Observe fullscreen entry BEFORE triggering the transition
         observeFullscreenEntry(completion: completion)
@@ -1442,6 +1495,10 @@ class DisplayManager: ObservableObject {
         if let observer = fullscreenObserver {
             NotificationCenter.default.removeObserver(observer)
             fullscreenObserver = nil
+        }
+        if let observer = helperScreenObserver {
+            NotificationCenter.default.removeObserver(observer)
+            helperScreenObserver = nil
         }
         guard let helper = fullscreenHelper else { return }
 
