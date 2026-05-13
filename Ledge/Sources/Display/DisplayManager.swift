@@ -1657,6 +1657,32 @@ class DisplayManager: ObservableObject {
     }
 
     private func foundXenonEdge(_ screen: NSScreen, method: String) {
+        // SAFETY GUARD — refuse to claim a screen that is the macOS main display.
+        //
+        // The Edge is meant to be a *secondary* display alongside the user's
+        // primary workspace screen. If detection lands on the main display we
+        // would either:
+        //   (a) cover the user's only screen with widgets (Edge-only / lid-
+        //       closed setups where Edge is the sole display), or
+        //   (b) silently render on the wrong screen because detection was
+        //       confused mid-topology-flux (the bug seen on wake when the
+        //       Edge briefly sits at (0,0) before LG re-joins and shifts it
+        //       to its real position).
+        //
+        // Both axes are checked: AppKit's `NSScreen.main` and CoreGraphics'
+        // `CGMainDisplayID()`. They agree, but CG works even before AppKit
+        // finishes updating its screen list, which matters during topology
+        // transitions.
+        let isMainAppKit = (screen == NSScreen.main)
+        let isMainCG = (screen.displayID == CGMainDisplayID())
+        if isMainAppKit || isMainCG {
+            xeneonScreen = nil
+            isActive = false
+            statusMessage = "Detection rejected: candidate Edge is the main display. Ledge will not render on the user's primary workspace."
+            logger.warning("Xeneon Edge detection via \(method, privacy: .public) REJECTED — candidate screen is the main display (NSScreen.main=\(isMainAppKit, privacy: .public), CGMainDisplayID=\(isMainCG, privacy: .public)). Frame=\(NSStringFromRect(screen.frame), privacy: .public). Refusing to render.")
+            return
+        }
+
         xeneonScreen = screen
         let frame = screen.frame
         statusMessage = "Found: \(screen.localizedName) (\(Int(frame.width))×\(Int(frame.height)))"
