@@ -2035,29 +2035,45 @@ class DisplayManager: ObservableObject {
     }
 
     private func foundXenonEdge(_ screen: NSScreen, method: String) {
-        // SAFETY GUARD — refuse to claim a screen that is the macOS main display.
+        // SAFETY GUARD — refuse to claim a screen that is the macOS primary
+        // display (the one with the menu bar, `CGMainDisplayID()`).
         //
         // The Edge is meant to be a *secondary* display alongside the user's
-        // primary workspace screen. If detection lands on the main display we
-        // would either:
+        // primary workspace screen. If detection lands on the primary display
+        // we would either:
         //   (a) cover the user's only screen with widgets (Edge-only / lid-
         //       closed setups where Edge is the sole display), or
         //   (b) silently render on the wrong screen because detection was
-        //       confused mid-topology-flux (the bug seen on wake when the
-        //       Edge briefly sits at (0,0) before LG re-joins and shifts it
-        //       to its real position).
+        //       confused mid-topology-flux.
         //
-        // Both axes are checked: AppKit's `NSScreen.main` and CoreGraphics'
-        // `CGMainDisplayID()`. They agree, but CG works even before AppKit
-        // finishes updating its screen list, which matters during topology
-        // transitions.
-        let isMainAppKit = (screen == NSScreen.main)
-        let isMainCG = (screen.displayID == CGMainDisplayID())
-        if isMainAppKit || isMainCG {
+        // Why CG-only, not NSScreen.main:
+        //
+        // We previously also rejected on `screen == NSScreen.main`. That guard
+        // was wrong. `NSScreen.main` returns the screen containing the **key
+        // window**, NOT the primary display — Apple's docs lead a lot of
+        // developers astray on this. Once `LedgePanel` becomes key on the Edge
+        // (necessary for touch/SwiftUI gesture routing), `NSScreen.main` flips
+        // to the Edge even though `CGMainDisplayID()` still correctly reports
+        // the LG / internal display.
+        //
+        // The result: AppKit said "main=true", CG said "main=false", the OR
+        // tripped the rejection, panel destroyed, auto-restore re-created it
+        // → became key again → rejection fired again → loop. Observed in the
+        // wake reproduction at 16:38:13.273+ with the bracketed mismatch
+        // `(NSScreen.main=true, CGMainDisplayID=false)` on every rejection.
+        //
+        // `CGMainDisplayID()` is the **primary display** in the System Settings
+        // sense — the one with the menu bar, the one that owns the global
+        // (0,0) origin. It does not follow window focus. That's the correct
+        // semantic for "main workspace screen". Trusting CG alone removes the
+        // false positive without weakening the genuine "don't steal the only
+        // screen" intent — in a single-display setup the Edge is the only
+        // screen AND `CGMainDisplayID()`, so the guard still fires.
+        if screen.displayID == CGMainDisplayID() {
             xeneonScreen = nil
             isActive = false
-            statusMessage = "Detection rejected: candidate Edge is the main display. Ledge will not render on the user's primary workspace."
-            logger.warning("Xeneon Edge detection via \(method, privacy: .public) REJECTED — candidate screen is the main display (NSScreen.main=\(isMainAppKit, privacy: .public), CGMainDisplayID=\(isMainCG, privacy: .public)). Frame=\(NSStringFromRect(screen.frame), privacy: .public). Refusing to render.")
+            statusMessage = "Detection rejected: candidate Edge is the primary display. Ledge will not render on the user's primary workspace."
+            logger.warning("Xeneon Edge detection via \(method, privacy: .public) REJECTED — candidate screen is the primary display (CGMainDisplayID match). Frame=\(NSStringFromRect(screen.frame), privacy: .public). Refusing to render.")
             return
         }
 
