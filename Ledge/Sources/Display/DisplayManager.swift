@@ -263,6 +263,36 @@ class DisplayManager: ObservableObject {
     /// Catches the migration in real time and triggers a sanity rebuild.
     private var helperScreenObserver: Any?
 
+    /// Lifecycle phase of the fullscreen helper.
+    ///
+    /// Architect-flagged: replaces the previous timer-cascade
+    /// (`tearDown` + `asyncAfter(0.5)` + `ensureFullscreenHelper`) with
+    /// explicit state so reentrant `handleDisplayChange` calls can be
+    /// queued instead of stacking conflicting transitions. The wake bug
+    /// reproduction showed three timers (2s entry timeout, 0.5s rebuild
+    /// delay, 2s exit timeout) interleaving and producing an orphan
+    /// helper. With explicit state we can refuse to start a new transition
+    /// until the previous one settles, and queue any change request that
+    /// arrives during a transition for re-evaluation when it completes.
+    enum HelperState: Equatable {
+        /// No helper exists.
+        case none
+        /// `ensureFullscreenHelper` is in progress for `displayID`.
+        /// Further change requests are queued via `pendingRebuildDisplayID`.
+        case building(displayID: CGDirectDisplayID)
+        /// Helper is in fullscreen on `displayID`.
+        case ready(displayID: CGDirectDisplayID)
+        /// Helper is exiting fullscreen and being torn down.
+        /// Further change requests are queued via `pendingRebuildDisplayID`.
+        case tearing(fromDisplayID: CGDirectDisplayID)
+    }
+    private var helperState: HelperState = .none
+
+    /// If a rebuild is requested while `helperState` is `.building` or
+    /// `.tearing`, the target displayID is stashed here. When the in-flight
+    /// transition completes, this is consulted and triggers the next rebuild.
+    private var pendingRebuildDisplayID: CGDirectDisplayID?
+
     /// Periodic device-ID refresh interval. 60 s is a deliberate balance:
     /// short enough that a missed wake notification still self-heals within a
     /// minute, long enough that the IOKit enumeration cost is negligible.
@@ -702,15 +732,34 @@ class DisplayManager: ObservableObject {
                     // screen frame.
                     panel?.reposition(on: currentScreen)
 
+                    // State-machine-gated rebuild — architect-flagged.
+                    //
+                    // If we're mid-transition (`.building` or `.tearing`),
+                    // queue this displayID and bail. The in-flight transition's
+                    // completion handler will drain the queue and re-enter.
+                    // This prevents the timer-cascade race that produced the
+                    // wake-orphan bug (concurrent tearDown + asyncAfter rebuild
+                    // + 2s fullscreen-entry timeout all firing against
+                    // overlapping helper instances).
                     if fullscreenHelper != nil {
-                        logger.info("Rebuilding fullscreen helper for new screen frame")
-                        tearDownFullscreenHelper()
-                        // Brief delay to let the async fullscreen exit animation begin
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                            guard let self, let screen = self.xeneonScreen else { return }
-                            self.ensureFullscreenHelper(on: screen) { [weak self] in
+                        switch helperState {
+                        case .building, .tearing:
+                            if let id = currentScreen.displayID {
+                                pendingRebuildDisplayID = id
+                                logger.info("Queued rebuild for displayID=\(id, privacy: .public) — helper transition in flight")
+                            }
+                        case .none, .ready:
+                            logger.info("Rebuilding fullscreen helper for new screen frame")
+                            // Sequential: tearDown → ensureFullscreenHelper →
+                            // revealPanel. The `then:` callback fires off the
+                            // actual didExitFullScreen notification (or its
+                            // cancellable fallback), not a fragile 0.5s timer.
+                            tearDownFullscreenHelper { [weak self] in
                                 guard let self, let screen = self.xeneonScreen else { return }
-                                self.revealPanel(on: screen)
+                                self.ensureFullscreenHelper(on: screen) { [weak self] in
+                                    guard let self, let screen = self.xeneonScreen else { return }
+                                    self.revealPanel(on: screen)
+                                }
                             }
                         }
                     }
@@ -1358,6 +1407,18 @@ class DisplayManager: ObservableObject {
 
     // MARK: - Fullscreen Helper (Menu Bar Hiding)
 
+    /// If a topology change request arrived while the helper was mid-transition,
+    /// it was queued via `pendingRebuildDisplayID`. Now that we're in a stable
+    /// state, drain the queue by re-entering `handleDisplayChange` indirectly
+    /// (via `scheduleDisplayChange` so the debounce kicks in and collapses any
+    /// further bursts).
+    private func checkPendingRebuild() {
+        guard let _ = pendingRebuildDisplayID else { return }
+        pendingRebuildDisplayID = nil
+        logger.info("Draining queued rebuild — re-evaluating topology")
+        scheduleDisplayChange()
+    }
+
     /// Watch for AppKit silently migrating the fullscreen helper to a different
     /// display. This is the architect-flagged orphan-detection path.
     ///
@@ -1412,9 +1473,29 @@ class DisplayManager: ObservableObject {
     /// The LedgePanel (with `.fullScreenAuxiliary` + `.canJoinAllSpaces`) renders on top
     /// of the fullscreen helper, receiving all touch/mouse input as before.
     private func ensureFullscreenHelper(on screen: NSScreen, completion: @escaping () -> Void) {
-        // If helper already exists and is in fullscreen, proceed immediately
-        if let helper = fullscreenHelper, helper.styleMask.contains(.fullScreen) {
+        // If helper already exists and is in fullscreen on the *target*
+        // display, proceed immediately. The target check is critical — a
+        // helper fullscreen on the wrong display is just as bad as no
+        // helper at all (architect-flagged orphan case).
+        if let helper = fullscreenHelper,
+           helper.styleMask.contains(.fullScreen),
+           helper.screen?.displayID == screen.displayID {
+            helperState = .ready(displayID: screen.displayID ?? 0)
             completion()
+            return
+        }
+
+        // If helper exists on the WRONG display, force a teardown then rebuild.
+        // This is the recovery path the helperScreenObserver triggers via
+        // scheduleDisplayChange — but we also handle it defensively here.
+        if let helper = fullscreenHelper,
+           helper.screen?.displayID != screen.displayID {
+            tearDownFullscreenHelper { [weak self] in
+                guard let self else { return }
+                // Re-fetch xeneonScreen in case it shifted during teardown.
+                guard let latest = self.xeneonScreen else { return }
+                self.ensureFullscreenHelper(on: latest, completion: completion)
+            }
             return
         }
 
@@ -1422,6 +1503,10 @@ class DisplayManager: ObservableObject {
         if fullscreenHelper != nil {
             observeFullscreenEntry(completion: completion)
             return
+        }
+
+        if let id = screen.displayID {
+            helperState = .building(displayID: id)
         }
 
         // The helper needs .titled for toggleFullScreen to work. fullSizeContentView +
@@ -1507,6 +1592,11 @@ class DisplayManager: ObservableObject {
                 }
                 self.fullscreenEntryTimeout?.cancel()
                 self.fullscreenEntryTimeout = nil
+                // Mark the helper as ready on the display it's now on.
+                if let id = self.fullscreenHelper?.screen?.displayID {
+                    self.helperState = .ready(displayID: id)
+                }
+                self.checkPendingRebuild()
                 completion()
             }
         }
@@ -1540,7 +1630,14 @@ class DisplayManager: ObservableObject {
     ///
     /// Fix: make the helper transparent immediately so the exit animation is
     /// invisible, then observe `didExitFullScreen` to clean up properly.
-    private func tearDownFullscreenHelper() {
+    ///
+    /// - Parameter then: invoked after teardown has settled (either on
+    ///   `didExitFullScreen` arrival or fallback timeout). Replaces the
+    ///   previous `asyncAfter(0.5)` rebuild trick — chains the next
+    ///   transition off the actual teardown completion instead of guessing.
+    ///   Architect-flagged: the timer-stacking pattern was a key contributor
+    ///   to the wake-orphan bug.
+    private func tearDownFullscreenHelper(then completion: (() -> Void)? = nil) {
         if let observer = fullscreenObserver {
             NotificationCenter.default.removeObserver(observer)
             fullscreenObserver = nil
@@ -1553,11 +1650,37 @@ class DisplayManager: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
             helperScreenObserver = nil
         }
-        guard let helper = fullscreenHelper else { return }
+        guard let helper = fullscreenHelper else {
+            // Nothing to tear down — settle state and fire completion synchronously.
+            helperState = .none
+            completion?()
+            return
+        }
+
+        // Move to .tearing so any concurrent change requests get queued
+        // rather than starting a fresh transition mid-exit.
+        let fromID: CGDirectDisplayID? = {
+            if case let .ready(id) = helperState { return id }
+            if case let .building(id) = helperState { return id }
+            return helper.screen?.displayID
+        }()
+        if let fromID = fromID {
+            helperState = .tearing(fromDisplayID: fromID)
+        }
 
         // Make the helper invisible immediately so the user doesn't see
         // a black screen during the async fullscreen exit animation.
         helper.alphaValue = 0
+
+        // Single-shot guard so completion fires exactly once even if both
+        // the notification AND the fallback timer race in.
+        var didFinish = false
+        let finish: () -> Void = { [weak self] in
+            guard !didFinish else { return }
+            didFinish = true
+            self?.helperState = .none
+            completion?()
+        }
 
         if helper.styleMask.contains(.fullScreen) {
             // Observe the exit completion to clean up
@@ -1566,30 +1689,35 @@ class DisplayManager: ObservableObject {
                 object: helper,
                 queue: .main
             ) { [weak self] notification in
-                // Extract the window reference before crossing the Task boundary
-                // (Notification is non-Sendable)
                 guard let window = notification.object as? NSWindow else { return }
                 Task { @MainActor [weak self] in
                     window.orderOut(nil)
                     if self?.fullscreenHelper === window {
                         self?.fullscreenHelper = nil
                     }
+                    finish()
                 }
             }
 
             helper.toggleFullScreen(nil)
 
-            // Fallback: if the notification never fires, force cleanup after 2s
+            // Fallback: if the notification never fires, force cleanup after 2s.
+            // No cancellation needed — `didFinish` inside `finish()` makes a
+            // second invocation a no-op, so the timer firing after a fast
+            // notification is harmless. Avoiding mutable cross-actor captures
+            // (DispatchWorkItem isn't Sendable in strict-concurrency mode).
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 NotificationCenter.default.removeObserver(exitObserver)
                 helper.orderOut(nil)
                 if self?.fullscreenHelper === helper {
                     self?.fullscreenHelper = nil
                 }
+                finish()
             }
         } else {
             helper.orderOut(nil)
             fullscreenHelper = nil
+            finish()
         }
 
         logger.info("Fullscreen helper tear-down initiated")
