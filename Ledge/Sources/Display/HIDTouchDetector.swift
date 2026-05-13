@@ -100,10 +100,40 @@ nonisolated class HIDTouchDetector {
             // Walk the IOService tree descendants and add their IDs too.
             // CGEvent field 87 uses the ID of a descendant (e.g. IOHIDEventDriver),
             // not the IOHIDDevice itself.
+            //
+            // Bug B fix: dedupe by className keeping the HIGHEST registry ID
+            // per class. IOKit doesn't always release stale IOService entries
+            // from previous IOHIDManagerOpen cycles immediately — they linger
+            // in the kIOServicePlane until the kernel garbage-collects them.
+            // Each enumeration sees old+new entries side-by-side, so the raw
+            // descendant list grew monotonically (16 → 210+ in 50 detect()
+            // cycles in the user's reproduction), pumping up `touchDeviceIDs`
+            // and slowing CGEvent matching for every event.
+            //
+            // The live entry for any given class is always the most recently
+            // created — i.e. the highest registry ID. Older entries are dead
+            // proxies that won't ever generate events. Taking only the
+            // highest-per-class:
+            //   - bounds the descendant set to ~one entry per distinct class
+            //     per interface (typically <10 classes total),
+            //   - is stable across enumerations once IOKit settles,
+            //   - still includes the active IOHIDEventDriver / IOHIDEvent-
+            //     Service whose ID lands in mouseEventDeviceID.
             let descendants = descendantRegistryIDs(for: device)
+            var liveByClass: [String: UInt64] = [:]
             for (className, regID) in descendants {
+                if let existing = liveByClass[className] {
+                    if regID > existing { liveByClass[className] = regID }
+                } else {
+                    liveByClass[className] = regID
+                }
+            }
+            for (className, regID) in liveByClass {
                 allIDs.insert(Int64(regID))
                 logger.info("    └─ \(className) RegistryID=\(regID)")
+            }
+            if descendants.count > liveByClass.count {
+                logger.info("    (filtered \(descendants.count - liveByClass.count) stale IOKit registry entries)")
             }
         }
 
