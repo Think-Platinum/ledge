@@ -229,6 +229,13 @@ class DisplayManager: ObservableObject {
     private var fullscreenHelper: FullscreenHelperWindow?
     /// Observer for fullscreen entry to show the panel once the Space is ready.
     private var fullscreenObserver: Any?
+    /// Cancellable timeout paired with `fullscreenObserver`. Stored as a
+    /// `DispatchWorkItem` (not a plain `asyncAfter`) so a rapid rebuild
+    /// cycle can cancel the previous timer before installing a new one —
+    /// otherwise the stale timer fires against the new observer and calls
+    /// completion prematurely. See the architect-flagged race in
+    /// `observeFullscreenEntry`.
+    private var fullscreenEntryTimeout: DispatchWorkItem?
     /// Permission gate: timer, retained objects, and completion for pre-panel permission requests.
     private var permissionGateTimer: Timer?
     private var gateLocationManager: CLLocationManager?
@@ -1464,12 +1471,28 @@ class DisplayManager: ObservableObject {
     }
 
     /// Wait for the fullscreen helper to finish entering fullscreen, then call completion.
+    ///
+    /// Architect-flagged race: the previous implementation's 2-second timeout
+    /// was a non-cancellable `asyncAfter`. When a rapid rebuild re-installed a
+    /// new observer (and a new 2s timer) before the *previous* timer fired,
+    /// the old timer would see `fullscreenObserver != nil` (now belonging to
+    /// the new observer), remove the *new* observer, and call completion
+    /// prematurely. This was the smoking gun in the wake reproduction at
+    /// 08:28:14.893 ("Fullscreen entry timed out — showing panel anyway").
+    ///
+    /// Fix: store the timeout as a `DispatchWorkItem` so we can cancel it
+    /// when the notification arrives, when a new observer takes over, or
+    /// when the helper is torn down. No more zombie timers.
     private func observeFullscreenEntry(completion: @escaping () -> Void) {
-        // Clean up any previous observer
+        // Clean up any previous observer + cancel any pending timeout —
+        // both belong to the previous observation cycle and must not fire
+        // against the new one.
         if let obs = fullscreenObserver {
             NotificationCenter.default.removeObserver(obs)
             fullscreenObserver = nil
         }
+        fullscreenEntryTimeout?.cancel()
+        fullscreenEntryTimeout = nil
 
         fullscreenObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didEnterFullScreenNotification,
@@ -1477,24 +1500,36 @@ class DisplayManager: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                if let obs = self?.fullscreenObserver {
+                guard let self else { return }
+                if let obs = self.fullscreenObserver {
                     NotificationCenter.default.removeObserver(obs)
-                    self?.fullscreenObserver = nil
+                    self.fullscreenObserver = nil
                 }
+                self.fullscreenEntryTimeout?.cancel()
+                self.fullscreenEntryTimeout = nil
                 completion()
             }
         }
 
-        // Fallback: if the notification never fires, show after 2 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard self?.fullscreenObserver != nil else { return }
-            if let obs = self?.fullscreenObserver {
+        // Fallback timeout — cancellable. Fires once, only if the entry
+        // notification didn't arrive first AND the timeout wasn't cancelled
+        // by a new observation cycle starting up.
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Re-check that the observer this timeout was paired with is
+            // still active. If a new observation cycle has started, this
+            // timeout is stale and must do nothing.
+            guard self.fullscreenEntryTimeout != nil else { return }
+            if let obs = self.fullscreenObserver {
                 NotificationCenter.default.removeObserver(obs)
-                self?.fullscreenObserver = nil
+                self.fullscreenObserver = nil
             }
-            self?.logger.warning("Fullscreen entry timed out — showing panel anyway")
+            self.fullscreenEntryTimeout = nil
+            self.logger.warning("Fullscreen entry timed out — showing panel anyway")
             completion()
         }
+        fullscreenEntryTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
     }
 
     /// Exit fullscreen and clean up the helper window.
@@ -1510,6 +1545,10 @@ class DisplayManager: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
             fullscreenObserver = nil
         }
+        // Cancel any pending entry timeout so it can't fire against the
+        // window we're about to tear down.
+        fullscreenEntryTimeout?.cancel()
+        fullscreenEntryTimeout = nil
         if let observer = helperScreenObserver {
             NotificationCenter.default.removeObserver(observer)
             helperScreenObserver = nil
