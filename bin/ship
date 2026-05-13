@@ -256,45 +256,26 @@ fi
 restore_build_info
 
 # ---------------------------------------------------------------------------
-# 6a. Pin LC_UUID and re-sign
+# Why we DON'T pin LC_UUID here
 # ---------------------------------------------------------------------------
 #
-# Why: macOS Local Network privacy keeps a per-LC_UUID cache (nehelper's
-# UUID cache) that backs the rows in System Settings -> Privacy & Security
-# -> Local Network. The linker emits a content-hashed UUID by default, so
-# every dev build produces a new UUID and a new row in that panel. Pinning
-# the UUID to a deterministic value derived from the bundle ID makes every
-# build share one cache entry, so the panel stays clean.
+# A previous version of this script ran `bin/pin-lc-uuid.py` after the
+# build to give every ship the same LC_UUID, on the theory that doing
+# so would stop macOS Local Network privacy (which keys on LC_UUID)
+# from accumulating duplicate rows in System Settings.
 #
-# This is an unsupported workaround for radar 134842755. The signing-
-# identity stability handled above takes care of the TCC side (Accessibility
-# etc.); this step takes care of the Local Network side.
+# That broke OSLog. macOS caches each binary's __oslogstring section
+# in /var/db/uuidtext/<first-2>/<remaining-30>, indexed by LC_UUID.
+# When two builds share a UUID but their format strings differ (which
+# they do as soon as any logging code changes), logd composes new log
+# lines against the stale cached format strings and emits
+# `<compose failure [UUID]>` for everything — making the in-app log
+# viewer useless.
 #
-# Order matters: xcodebuild has already signed the bundle; rewriting LC_UUID
-# invalidates that signature, so we re-codesign after the rewrite.
-
-echo "→ Pinning LC_UUID…"
-"$REPO_ROOT/bin/pin-lc-uuid.py" "$APP_SOURCE/Contents/MacOS/Ledge" "$BUNDLE_ID"
-
-# --preserve-metadata keeps the entitlements blob, hardened-runtime flags,
-# and any internal requirements from the xcodebuild signature. Without it
-# we'd lose `com.apple.security.get-task-allow` and the sandbox file-access
-# entitlement, which xcodebuild applied from the Xcode project settings.
-echo "→ Re-signing after UUID rewrite…"
-codesign --force \
-    --preserve-metadata=entitlements,flags,runtime,requirements \
-    --sign "$SIGN_IDENTITY" \
-    "$APP_SOURCE"
-
-# Sanity-check: confirm the pinned UUID survived re-signing and the
-# entitlements are still present. Cheap, catches signature surprises.
-POST_SIGN_UUID=$(dwarfdump --uuid "$APP_SOURCE/Contents/MacOS/Ledge" 2>/dev/null \
-    | awk '/arm64/ {print $2; exit}')
-if [[ -z "$POST_SIGN_UUID" ]]; then
-    echo "error: could not read LC_UUID from re-signed binary" >&2
-    exit 1
-fi
-echo "  Pinned UUID: $POST_SIGN_UUID"
+# The content-hashed UUID the linker emits by default is exactly what
+# makes the OSLog cache work. We respect it and accept the Local
+# Network duplicates instead — they're cosmetic and can be cleared
+# periodically with `bin/recovery-lnp-cleanup.sh`.
 
 # ---------------------------------------------------------------------------
 # 7. Install (ditto preserves signature metadata and xattrs)

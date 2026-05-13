@@ -130,8 +130,11 @@ Apple menu → **Restart**. Don't hold any keys this time — just a normal boot
 3. Launch Ledge. The first time it tries to find something on the LAN, macOS
    will prompt you for Local Network access. Click **Allow**. **One** new row
    will appear in the panel.
-4. With the LC_UUID-pinning step in `bin/ship`, every subsequent ship will
-   reuse that one row instead of adding more.
+4. Each subsequent `bin/ship` will add a new row (the linker emits a
+   fresh content-hashed `LC_UUID` per build, and macOS keys the panel
+   on that). Re-run this Recovery procedure when the list gets long
+   enough to bother you. We tried pinning the UUID to avoid this — see
+   the comment in `bin/ship` for why we don't anymore (it broke OSLog).
 5. Re-approve any VPN / network filter system extensions if their apps
    complain.
 
@@ -171,6 +174,8 @@ Network Extension framework instead, with no developer-facing reset tool. Quinn
 "The Eskimo!" at Apple DTS has confirmed this on the developer forums multiple
 times — the open Apple radar is `r. 134842755`.
 
-The `bin/ship` script handles the *cause* (LC_UUID pinning so future builds
-reuse one row), but it can't retroactively merge the rows that already exist.
-That's what this Recovery procedure is for.
+There is no scriptable way to prevent new rows from accruing — Apple's own
+linker has to emit a new `LC_UUID` per build for OSLog's format-string
+cache to work, and macOS keys the Local Network panel on that same UUID.
+So the realistic strategy is: ship as normal, and re-run this Recovery
+procedure occasionally when the list gets cluttered.
