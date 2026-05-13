@@ -798,22 +798,32 @@ class DisplayManager: ObservableObject {
         logger.notice("handleDisplayChange diff: identity changed=\(identityChanged, privacy: .public) (\(previousIdentity.map(String.init) ?? "nil", privacy: .public)→\(currentIdentity.map(String.init) ?? "nil", privacy: .public)) | frame changed=\(frameChanged, privacy: .public) (\(previousFrame.map(NSStringFromRect) ?? "nil", privacy: .public)→\(currentFrame.map(NSStringFromRect) ?? "nil", privacy: .public)) | displayID changed=\(displayIDChanged, privacy: .public) (\(previousDisplayID.map(String.init) ?? "nil", privacy: .public)→\(currentDisplayID.map(String.init) ?? "nil", privacy: .public))")
 
         if let currentScreen = xeneonScreen {
-            // Topology comparison — three independent change axes (architect-flagged).
+            // Topology comparison — frame OR displayID, NOT NSScreen identity.
             //
-            // The previous guard `currentScreen != previousScreen` only checked
-            // NSScreen *reference* identity, which silently no-ops the most
-            // common real-world case: the same NSScreen instance is reused but
-            // its `frame.origin` shifts because another display was attached/
-            // detached/rearranged. That's exactly what the Bug 2 wake log
-            // showed — Edge's frame went from (0,0) to (548,-720) without the
-            // displayID changing, while the NSScreen instance kept the same
-            // pointer on some passes and a new one on others.
+            // Earlier we included `identityChanged` in this OR, but log
+            // evidence showed AppKit oscillates the NSScreen instance
+            // pointer across helper build/teardown cycles even when the
+            // physical topology is unchanged: the identity hash flipped
+            // between two stable values (6729052564448237736 and
+            // 6233674584976057384) on every fullscreen transition we
+            // initiated ourselves. That kicked off a self-induced feedback
+            // loop:
             //
-            // Treat ANY of (identity, frame, displayID) changing as a topology
-            // change worth acting on. False positives are cheap (a redundant
-            // panel reposition is harmless); false negatives cost the user a
-            // misaligned panel or an orphan helper on the wrong screen.
-            let topologyChanged = identityChanged || frameChanged || displayIDChanged
+            //   helper teardown → didChangeScreenParameters → identityChanged
+            //     → "Xeneon Edge repositioned" → rebuild helper → didChange…
+            //     → identityChanged → … (forever, plus a HID device-ID leak
+            //     because each pass pumps refreshTouchDeviceIDs)
+            //
+            // Frame and displayID are the only axes that mean "the physical
+            // topology actually changed". NSScreen identity churn is AppKit-
+            // internal noise and must NOT trigger a rebuild — otherwise we
+            // become our own perpetual-motion machine.
+            //
+            // The frame check still catches the original Bug 2 (Edge moved
+            // (0,0)→(548,-720) when LG re-joined). The displayID check
+            // catches a physical-display swap. Identity is preserved in
+            // diagnostic logs only.
+            let topologyChanged = frameChanged || displayIDChanged
             if topologyChanged {
                 // Screen changed (e.g., rearranged, or Edge returned after disconnect).
                 logger.info("Xeneon Edge repositioned, updating panel frame and touch target")
