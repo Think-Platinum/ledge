@@ -10,8 +10,47 @@ struct HomeAssistantWidget {
     struct Config: Codable {
         var serverURL: String = ""
         var accessToken: String = ""
-        var entityIDs: [String] = []
+        var entries: [EntityEntry] = []
         var pollingInterval: Int = 5  // seconds
+
+        /// Bare entity IDs in widget order. Consumed by `HomeAssistantClient.fetchStates`.
+        var entityIDs: [String] { entries.map(\.id) }
+
+        struct EntityEntry: Codable, Identifiable, Hashable {
+            let id: String
+            var displayName: String?
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case serverURL, accessToken, entries, entityIDs, pollingInterval
+        }
+
+        init() {}
+
+        // Legacy on-disk shape used `entityIDs: [String]`; migrate it to `entries`
+        // with no overrides on first decode. Future writes always emit `entries`.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            serverURL = try c.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
+            accessToken = try c.decodeIfPresent(String.self, forKey: .accessToken) ?? ""
+            pollingInterval = try c.decodeIfPresent(Int.self, forKey: .pollingInterval) ?? 5
+
+            if let newEntries = try c.decodeIfPresent([EntityEntry].self, forKey: .entries) {
+                entries = newEntries
+            } else if let legacyIDs = try c.decodeIfPresent([String].self, forKey: .entityIDs) {
+                entries = legacyIDs.map { EntityEntry(id: $0, displayName: nil) }
+            } else {
+                entries = []
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(serverURL, forKey: .serverURL)
+            try c.encode(accessToken, forKey: .accessToken)
+            try c.encode(entries, forKey: .entries)
+            try c.encode(pollingInterval, forKey: .pollingInterval)
+        }
     }
 
     static let descriptor = WidgetDescriptor(
@@ -136,7 +175,7 @@ struct HomeAssistantWidgetView: View {
                 .foregroundColor(colorForEntity(entity))
                 .contentTransition(.symbolEffect(.replace))
 
-            Text(entity.friendlyName)
+            Text(displayName(for: entity))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(theme.primaryText.opacity(0.85))
                 .lineLimit(1)
@@ -175,6 +214,15 @@ struct HomeAssistantWidgetView: View {
                 await fetchEntities()
             }
         }
+    }
+
+    /// User-supplied display-name override for an entity, falling back to HA's `friendly_name`.
+    private func displayName(for entity: HomeAssistantClient.EntityState) -> String {
+        if let override = config.entries.first(where: { $0.id == entity.id })?.displayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
+            return override
+        }
+        return entity.friendlyName
     }
 
     private func iconForEntity(_ entity: HomeAssistantClient.EntityState) -> String {
@@ -325,22 +373,31 @@ struct HomeAssistantSettingsView: View {
             }
 
             Section("Entities") {
-                // Currently added entities
-                ForEach(config.entityIDs, id: \.self) { entityID in
-                    HStack {
-                        let entity = availableEntities.first { $0.id == entityID }
+                // Currently added entities — each row exposes a display-name override.
+                ForEach($config.entries, id: \.id) { $entry in
+                    let entity = availableEntities.first { $0.id == entry.id }
+                    let placeholder = entity?.friendlyName ?? entry.id
+                    HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(entity?.friendlyName ?? entityID)
-                                .font(.system(size: 12, weight: .medium))
-                            if entity != nil {
-                                Text(entityID)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                            }
+                            TextField(
+                                placeholder,
+                                text: Binding(
+                                    get: { entry.displayName ?? "" },
+                                    set: { newValue in
+                                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        entry.displayName = trimmed.isEmpty ? nil : newValue
+                                    }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .help("Custom display name. Leave blank to use the HA friendly name.")
+                            Text(entry.id)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
                         }
                         Spacer()
                         Button(role: .destructive) {
-                            config.entityIDs.removeAll { $0 == entityID }
+                            config.entries.removeAll { $0.id == entry.id }
                             saveConfig()
                         } label: {
                             Image(systemName: "trash")
@@ -384,7 +441,7 @@ struct HomeAssistantSettingsView: View {
                                         .font(.system(size: 10, design: .monospaced))
                                         .foregroundColor(.secondary)
                                     Button {
-                                        config.entityIDs.append(entity.id)
+                                        config.entries.append(.init(id: entity.id, displayName: nil))
                                         saveConfig()
                                     } label: {
                                         Image(systemName: "plus.circle.fill")
@@ -436,7 +493,7 @@ struct HomeAssistantSettingsView: View {
                                     entityIDError = "Must include domain (e.g., light.bedroom)"
                                     return
                                 }
-                                config.entityIDs.append(trimmed)
+                                config.entries.append(.init(id: trimmed, displayName: nil))
                                 newEntityID = ""
                                 entityIDError = nil
                                 saveConfig()
@@ -459,6 +516,7 @@ struct HomeAssistantSettingsView: View {
         .onChange(of: config.serverURL) { _, _ in saveConfig() }
         .onChange(of: config.accessToken) { _, _ in saveConfig() }
         .onChange(of: config.pollingInterval) { _, _ in saveConfig() }
+        .onChange(of: config.entries) { _, _ in saveConfig() }
     }
 
     private func loadConfig() {
