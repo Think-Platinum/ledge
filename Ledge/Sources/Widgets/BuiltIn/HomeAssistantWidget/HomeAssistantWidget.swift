@@ -21,6 +21,58 @@ struct HomeAssistantWidget {
             let id: String
             var displayName: String?
             var groupID: UUID?
+            var cellSize: CellSize = .oneByOne
+
+            private enum CodingKeys: String, CodingKey {
+                case id, displayName, groupID, cellSize
+            }
+
+            init(id: String, displayName: String? = nil, groupID: UUID? = nil, cellSize: CellSize = .oneByOne) {
+                self.id = id
+                self.displayName = displayName
+                self.groupID = groupID
+                self.cellSize = cellSize
+            }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                id = try c.decode(String.self, forKey: .id)
+                displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+                groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
+                cellSize = try c.decodeIfPresent(CellSize.self, forKey: .cellSize) ?? .oneByOne
+            }
+        }
+
+        /// Span of an entity card on the widget's sub-grid.
+        /// New cells default to 1×1; users can opt into wider/taller cells for
+        /// entities that benefit from inline controls or larger labels.
+        enum CellSize: String, Codable, Identifiable, CaseIterable, Hashable {
+            case oneByOne = "1x1"
+            case twoByOne = "2x1"
+            case oneByTwo = "1x2"
+            case twoByTwo = "2x2"
+
+            var id: String { rawValue }
+            var columns: Int {
+                switch self {
+                case .oneByOne, .oneByTwo: return 1
+                case .twoByOne, .twoByTwo: return 2
+                }
+            }
+            var rows: Int {
+                switch self {
+                case .oneByOne, .twoByOne: return 1
+                case .oneByTwo, .twoByTwo: return 2
+                }
+            }
+            var label: String {
+                switch self {
+                case .oneByOne: return "1×1"
+                case .twoByOne: return "2×1 (wide)"
+                case .oneByTwo: return "1×2 (tall)"
+                case .twoByTwo: return "2×2"
+                }
+            }
         }
 
         struct EntityGroup: Codable, Identifiable, Hashable {
@@ -84,6 +136,114 @@ struct HomeAssistantWidget {
             AnyView(HomeAssistantSettingsView(instanceID: instanceID, configStore: configStore))
         }
     )
+}
+
+// MARK: - Cell layout
+
+/// LayoutValueKey carrying a card's column×row span through the layout pass.
+private struct CellSpanKey: LayoutValueKey {
+    static let defaultValue: (columns: Int, rows: Int) = (1, 1)
+}
+
+private extension View {
+    func widgetCellSpan(_ size: HomeAssistantWidget.Config.CellSize) -> some View {
+        layoutValue(key: CellSpanKey.self, value: (size.columns, size.rows))
+    }
+}
+
+/// Packs variable-size cards into a fixed-column sub-grid, row-major auto-flow.
+/// Each subview carries its span via `CellSpanKey`. Container width determines
+/// the column count by dividing by `cellMinimum` to mirror `.adaptive(minimum:)`.
+private struct WidgetCellLayout: Layout {
+    var cellMinimum: CGFloat = 100
+    var cellHeight: CGFloat = 70
+    var spacing: CGFloat = 8
+
+    struct CellPlacement {
+        let col: Int
+        let row: Int
+        let columns: Int
+        let rows: Int
+    }
+
+    private func columnCount(forWidth width: CGFloat) -> Int {
+        max(1, Int((width + spacing) / (cellMinimum + spacing)))
+    }
+
+    private func cellWidth(forWidth width: CGFloat, columns: Int) -> CGFloat {
+        guard columns > 0 else { return width }
+        return (width - CGFloat(columns - 1) * spacing) / CGFloat(columns)
+    }
+
+    /// Auto-flow packing: row-major scan, first slot the cell fits in.
+    /// Returns one placement per subview, in subview order.
+    private func pack(subviews: Subviews, columns: Int) -> [CellPlacement] {
+        var occupied: Set<Int> = []
+        var maxRow = 0
+        var placements: [CellPlacement] = []
+        placements.reserveCapacity(subviews.count)
+
+        for view in subviews {
+            let (rawCols, rawRows) = view[CellSpanKey.self]
+            let cols = min(max(1, rawCols), columns)  // clamp to container width
+            let rows = max(1, rawRows)
+            var placedAt: (col: Int, row: Int)? = nil
+            var probeRow = 0
+
+            scan: while true {
+                let lastCol = columns - cols
+                for col in 0...lastCol {
+                    if fits(col: col, row: probeRow, cols: cols, rows: rows, occupied: occupied, columns: columns) {
+                        for r in probeRow..<(probeRow + rows) {
+                            for c in col..<(col + cols) {
+                                occupied.insert(c + r * columns)
+                            }
+                        }
+                        placedAt = (col, probeRow)
+                        break scan
+                    }
+                }
+                probeRow += 1
+                if probeRow > maxRow + subviews.count + 1 { break scan }  // safety bound
+            }
+
+            let final = placedAt ?? (0, maxRow)
+            placements.append(CellPlacement(col: final.col, row: final.row, columns: cols, rows: rows))
+            maxRow = max(maxRow, final.row + rows)
+        }
+
+        return placements
+    }
+
+    private func fits(col: Int, row: Int, cols: Int, rows: Int, occupied: Set<Int>, columns: Int) -> Bool {
+        for r in row..<(row + rows) {
+            for c in col..<(col + cols) where occupied.contains(c + r * columns) { return false }
+        }
+        return true
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? proposal.replacingUnspecifiedDimensions().width
+        let columns = columnCount(forWidth: width)
+        let placements = pack(subviews: subviews, columns: columns)
+        let maxRow = placements.map { $0.row + $0.rows }.max() ?? 0
+        let totalHeight = CGFloat(maxRow) * cellHeight + CGFloat(max(0, maxRow - 1)) * spacing
+        return CGSize(width: width, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let columns = columnCount(forWidth: bounds.width)
+        let cw = cellWidth(forWidth: bounds.width, columns: columns)
+        let placements = pack(subviews: subviews, columns: columns)
+        for (i, view) in subviews.enumerated() {
+            let p = placements[i]
+            let x = bounds.minX + CGFloat(p.col) * (cw + spacing)
+            let y = bounds.minY + CGFloat(p.row) * (cellHeight + spacing)
+            let w = CGFloat(p.columns) * cw + CGFloat(p.columns - 1) * spacing
+            let h = CGFloat(p.rows) * cellHeight + CGFloat(p.rows - 1) * spacing
+            view.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: w, height: h))
+        }
+    }
 }
 
 // MARK: - View
@@ -173,12 +333,8 @@ struct HomeAssistantWidgetView: View {
         ScrollView(.vertical, showsIndicators: false) {
             if config.groups.isEmpty {
                 // Backward-compatible flat layout — entry order drives display order.
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 8) {
-                    ForEach(orderedEntities { _ in true }) { entity in
-                        entityCard(entity)
-                    }
-                }
-                .padding(12)
+                packedGrid(entities: orderedEntities { _ in true })
+                    .padding(12)
             } else {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(config.groups) { group in
@@ -202,12 +358,24 @@ struct HomeAssistantWidgetView: View {
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(tone)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 8) {
-                ForEach(entities) { entity in
-                    entityCard(entity)
-                }
+            packedGrid(entities: entities)
+        }
+    }
+
+    /// Variable-cell-size packing. Each card carries its `cellSize` span via `widgetCellSpan`.
+    private func packedGrid(entities: [HomeAssistantClient.EntityState]) -> some View {
+        WidgetCellLayout {
+            ForEach(entities) { entity in
+                let size = cellSize(for: entity)
+                entityCard(entity)
+                    .widgetCellSpan(size)
             }
         }
+    }
+
+    /// Configured cell size for an entity (defaults to 1×1 when not set).
+    private func cellSize(for entity: HomeAssistantClient.EntityState) -> HomeAssistantWidget.Config.CellSize {
+        config.entries.first(where: { $0.id == entity.id })?.cellSize ?? .oneByOne
     }
 
     /// Live entities filtered to those whose `EntityEntry` matches `predicate`, ordered by `config.entries`.
@@ -516,6 +684,18 @@ struct HomeAssistantSettingsView: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 Spacer()
+                                Picker("Size", selection: Binding(
+                                    get: { config.entries[idx].cellSize },
+                                    set: { config.entries[idx].cellSize = $0 }
+                                )) {
+                                    ForEach(HomeAssistantWidget.Config.CellSize.allCases) { size in
+                                        Text(size.label).tag(size)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: 110)
+                                .help("Cell size in the widget grid.")
                                 if !config.groups.isEmpty {
                                     Picker("Group", selection: Binding(
                                         get: { config.entries[idx].groupID },
