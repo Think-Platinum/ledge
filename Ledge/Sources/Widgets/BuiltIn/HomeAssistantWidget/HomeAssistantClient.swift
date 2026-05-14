@@ -163,6 +163,51 @@ class HomeAssistantClient {
         }
     }
 
+    /// Fetch the entity_id → area name mapping via HA's `/api/template` endpoint.
+    /// Returns an empty dictionary on failure or when the user's token lacks template scope.
+    /// Entities with no area assigned in HA are omitted from the result.
+    func fetchEntityAreas() async -> [String: String] {
+        guard isConfigured else { return [:] }
+        guard let url = URL(string: "\(normalisedURL)/api/template") else { return [:] }
+
+        // Template returns one line per entity: `entity_id|area_id|area_name`. We use the
+        // area name as the group label (e.g. "Living Room"); area_id is kept as a debug aid.
+        // HA renders missing areas as the literal string "None".
+        let template = "{% for ent in states %}{{ ent.entity_id }}|{{ area_id(ent.entity_id) }}|{{ area_name(area_id(ent.entity_id)) }}\n{% endfor %}"
+        let body: [String: Any] = ["template": template]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                logger.error("fetchEntityAreas HTTP \(code, privacy: .public)")
+                return [:]
+            }
+            guard let text = String(data: data, encoding: .utf8) else { return [:] }
+            var result: [String: String] = [:]
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                let parts = line.split(separator: "|", omittingEmptySubsequences: false)
+                guard parts.count >= 3 else { continue }
+                let id = String(parts[0]).trimmingCharacters(in: .whitespaces)
+                let areaName = String(parts[2]).trimmingCharacters(in: .whitespaces)
+                if !id.isEmpty && !areaName.isEmpty && areaName != "None" {
+                    result[id] = areaName
+                }
+            }
+            return result
+        } catch {
+            logger.error("fetchEntityAreas error: \(error.localizedDescription, privacy: .public)")
+            return [:]
+        }
+    }
+
     /// Toggle a light or switch entity.
     func toggle(entityID: String) async {
         let domain = entityID.components(separatedBy: ".").first ?? "light"

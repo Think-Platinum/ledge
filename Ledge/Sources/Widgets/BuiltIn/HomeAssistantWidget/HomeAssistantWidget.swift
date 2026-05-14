@@ -11,6 +11,7 @@ struct HomeAssistantWidget {
         var serverURL: String = ""
         var accessToken: String = ""
         var entries: [EntityEntry] = []
+        var groups: [EntityGroup] = []
         var pollingInterval: Int = 5  // seconds
 
         /// Bare entity IDs in widget order. Consumed by `HomeAssistantClient.fetchStates`.
@@ -19,26 +20,39 @@ struct HomeAssistantWidget {
         struct EntityEntry: Codable, Identifiable, Hashable {
             let id: String
             var displayName: String?
+            var groupID: UUID?
+        }
+
+        struct EntityGroup: Codable, Identifiable, Hashable {
+            let id: UUID
+            var name: String
+
+            init(id: UUID = UUID(), name: String) {
+                self.id = id
+                self.name = name
+            }
         }
 
         private enum CodingKeys: String, CodingKey {
-            case serverURL, accessToken, entries, entityIDs, pollingInterval
+            case serverURL, accessToken, entries, groups, entityIDs, pollingInterval
         }
 
         init() {}
 
         // Legacy on-disk shape used `entityIDs: [String]`; migrate it to `entries`
         // with no overrides on first decode. Future writes always emit `entries`.
+        // `groups` is absent on legacy + post-#78 configs; defaults to empty.
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             serverURL = try c.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
             accessToken = try c.decodeIfPresent(String.self, forKey: .accessToken) ?? ""
             pollingInterval = try c.decodeIfPresent(Int.self, forKey: .pollingInterval) ?? 5
+            groups = try c.decodeIfPresent([EntityGroup].self, forKey: .groups) ?? []
 
             if let newEntries = try c.decodeIfPresent([EntityEntry].self, forKey: .entries) {
                 entries = newEntries
             } else if let legacyIDs = try c.decodeIfPresent([String].self, forKey: .entityIDs) {
-                entries = legacyIDs.map { EntityEntry(id: $0, displayName: nil) }
+                entries = legacyIDs.map { EntityEntry(id: $0, displayName: nil, groupID: nil) }
             } else {
                 entries = []
             }
@@ -49,6 +63,7 @@ struct HomeAssistantWidget {
             try c.encode(serverURL, forKey: .serverURL)
             try c.encode(accessToken, forKey: .accessToken)
             try c.encode(entries, forKey: .entries)
+            try c.encode(groups, forKey: .groups)
             try c.encode(pollingInterval, forKey: .pollingInterval)
         }
     }
@@ -156,13 +171,49 @@ struct HomeAssistantWidgetView: View {
 
     private var entityGrid: some View {
         ScrollView(.vertical, showsIndicators: false) {
+            if config.groups.isEmpty {
+                // Backward-compatible flat layout — entry order drives display order.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 8) {
+                    ForEach(orderedEntities { _ in true }) { entity in
+                        entityCard(entity)
+                    }
+                }
+                .padding(12)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(config.groups) { group in
+                        let groupEntities = orderedEntities { $0.groupID == group.id }
+                        if !groupEntities.isEmpty {
+                            sectionedGrid(title: group.name, entities: groupEntities, tone: theme.secondaryText)
+                        }
+                    }
+                    let ungrouped = orderedEntities { $0.groupID == nil }
+                    if !ungrouped.isEmpty {
+                        sectionedGrid(title: "Ungrouped", entities: ungrouped, tone: theme.tertiaryText)
+                    }
+                }
+                .padding(12)
+            }
+        }
+    }
+
+    private func sectionedGrid(title: String, entities: [HomeAssistantClient.EntityState], tone: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(tone)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 8) {
                 ForEach(entities) { entity in
                     entityCard(entity)
                 }
             }
-            .padding(12)
         }
+    }
+
+    /// Live entities filtered to those whose `EntityEntry` matches `predicate`, ordered by `config.entries`.
+    private func orderedEntities(matching predicate: (HomeAssistantWidget.Config.EntityEntry) -> Bool) -> [HomeAssistantClient.EntityState] {
+        let entitiesByID = Dictionary(uniqueKeysWithValues: entities.map { ($0.id, $0) })
+        return config.entries.filter(predicate).compactMap { entitiesByID[$0.id] }
     }
 
     private func entityCard(_ entity: HomeAssistantClient.EntityState) -> some View {
@@ -325,6 +376,10 @@ struct HomeAssistantSettingsView: View {
     @State private var searchText: String = ""
     @State private var selectedDomainFilter: String? = nil
 
+    // HA-areas auto-seed state (#79)
+    @State private var isLoadingAreas = false
+    @State private var areasError: String?
+
     /// Entities available to add (not already in config), filtered by search and domain.
     private var filteredEntities: [HomeAssistantClient.EntityState] {
         let existing = Set(config.entityIDs)
@@ -372,30 +427,128 @@ struct HomeAssistantSettingsView: View {
                     .help("Long-lived access token from your HA profile")
             }
 
+            Section("Groups") {
+                HStack {
+                    Button(isLoadingAreas ? "Loading..." : "Use HA areas") {
+                        Task { await seedGroupsFromHAAreas() }
+                    }
+                    .disabled(!hasCredentials || isLoadingAreas)
+                    .help("Auto-create groups from Home Assistant's area registry. Non-destructive.")
+
+                    if let areasError {
+                        Text(areasError)
+                            .font(.system(size: 11))
+                            .foregroundColor(.red)
+                            .lineLimit(2)
+                    }
+
+                    Spacer()
+
+                    Button("Add Group") {
+                        config.groups.append(.init(name: "Group \(config.groups.count + 1)"))
+                        saveConfig()
+                    }
+                }
+
+                ForEach(Array(config.groups.enumerated()), id: \.element.id) { idx, group in
+                    HStack(spacing: 6) {
+                        TextField("Group name", text: Binding(
+                            get: { config.groups[idx].name },
+                            set: { config.groups[idx].name = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+
+                        Button {
+                            moveGroup(idx, by: -1)
+                        } label: {
+                            Image(systemName: "arrow.up")
+                        }
+                        .disabled(idx == 0)
+                        .buttonStyle(.plain)
+
+                        Button {
+                            moveGroup(idx, by: 1)
+                        } label: {
+                            Image(systemName: "arrow.down")
+                        }
+                        .disabled(idx == config.groups.count - 1)
+                        .buttonStyle(.plain)
+
+                        Button(role: .destructive) {
+                            deleteGroup(group.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if config.groups.isEmpty {
+                    Text("No groups yet. Add one above, or use \"Use HA areas\" to auto-create groups from Home Assistant.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+
             Section("Entities") {
-                // Currently added entities — each row exposes a display-name override.
-                ForEach($config.entries, id: \.id) { $entry in
+                // Currently added entities — each row exposes display name, group, reorder + delete.
+                ForEach(Array(config.entries.enumerated()), id: \.element.id) { idx, entry in
                     let entity = availableEntities.first { $0.id == entry.id }
                     let placeholder = entity?.friendlyName ?? entry.id
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
                             TextField(
                                 placeholder,
                                 text: Binding(
-                                    get: { entry.displayName ?? "" },
+                                    get: { config.entries[idx].displayName ?? "" },
                                     set: { newValue in
                                         let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        entry.displayName = trimmed.isEmpty ? nil : newValue
+                                        config.entries[idx].displayName = trimmed.isEmpty ? nil : newValue
                                     }
                                 )
                             )
                             .textFieldStyle(.roundedBorder)
                             .help("Custom display name. Leave blank to use the HA friendly name.")
-                            Text(entry.id)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary)
+                            HStack(spacing: 6) {
+                                Text(entry.id)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                if !config.groups.isEmpty {
+                                    Picker("Group", selection: Binding(
+                                        get: { config.entries[idx].groupID },
+                                        set: { config.entries[idx].groupID = $0 }
+                                    )) {
+                                        Text("Ungrouped").tag(UUID?.none)
+                                        ForEach(config.groups) { group in
+                                            Text(group.name).tag(UUID?.some(group.id))
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .pickerStyle(.menu)
+                                    .frame(maxWidth: 140)
+                                }
+                            }
                         }
-                        Spacer()
+                        VStack(spacing: 2) {
+                            Button {
+                                moveEntry(idx, by: -1)
+                            } label: {
+                                Image(systemName: "arrow.up")
+                            }
+                            .disabled(!canMoveEntry(idx, by: -1))
+                            .buttonStyle(.plain)
+
+                            Button {
+                                moveEntry(idx, by: 1)
+                            } label: {
+                                Image(systemName: "arrow.down")
+                            }
+                            .disabled(!canMoveEntry(idx, by: 1))
+                            .buttonStyle(.plain)
+                        }
                         Button(role: .destructive) {
                             config.entries.removeAll { $0.id == entry.id }
                             saveConfig()
@@ -517,6 +670,91 @@ struct HomeAssistantSettingsView: View {
         .onChange(of: config.accessToken) { _, _ in saveConfig() }
         .onChange(of: config.pollingInterval) { _, _ in saveConfig() }
         .onChange(of: config.entries) { _, _ in saveConfig() }
+        .onChange(of: config.groups) { _, _ in saveConfig() }
+    }
+
+    // MARK: - Reorder + group helpers (#79)
+
+    /// Swap `idx` with its nearest neighbour in the same group (or in the global Ungrouped
+    /// bucket when `groupID` is nil). Operating globally would swap across non-adjacent
+    /// visible sections, producing no visible change — surprising UX.
+    private func moveEntry(_ idx: Int, by delta: Int) {
+        guard let target = neighbourIndex(of: idx, delta: delta) else { return }
+        config.entries.swapAt(idx, target)
+        saveConfig()
+    }
+
+    /// `true` when `idx` has a neighbour in the same group/Ungrouped bucket in the
+    /// given direction, so the up/down buttons can be disabled at section bounds.
+    private func canMoveEntry(_ idx: Int, by delta: Int) -> Bool {
+        neighbourIndex(of: idx, delta: delta) != nil
+    }
+
+    private func neighbourIndex(of idx: Int, delta: Int) -> Int? {
+        guard idx >= 0 && idx < config.entries.count else { return nil }
+        let currentGroup = config.entries[idx].groupID
+        let step = delta > 0 ? 1 : -1
+        var target = idx + step
+        while target >= 0 && target < config.entries.count {
+            if config.entries[target].groupID == currentGroup { return target }
+            target += step
+        }
+        return nil
+    }
+
+    private func moveGroup(_ idx: Int, by delta: Int) {
+        let target = idx + delta
+        guard target >= 0 && target < config.groups.count else { return }
+        config.groups.swapAt(idx, target)
+        saveConfig()
+    }
+
+    private func deleteGroup(_ groupID: UUID) {
+        config.groups.removeAll { $0.id == groupID }
+        // Orphaned entries fall back to Ungrouped — never lost.
+        for i in config.entries.indices where config.entries[i].groupID == groupID {
+            config.entries[i].groupID = nil
+        }
+        saveConfig()
+    }
+
+    private func seedGroupsFromHAAreas() async {
+        await MainActor.run {
+            isLoadingAreas = true
+            areasError = nil
+        }
+
+        let client = HomeAssistantClient()
+        var url = config.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !url.isEmpty && !url.hasPrefix("http://") && !url.hasPrefix("https://") {
+            url = "http://\(url)"
+        }
+        client.serverURL = url
+        client.accessToken = config.accessToken
+
+        let areas = await client.fetchEntityAreas()
+
+        await MainActor.run {
+            isLoadingAreas = false
+            if areas.isEmpty {
+                areasError = "Couldn't fetch areas. Check URL/token; HA's /api/template may be restricted by your access policy."
+                return
+            }
+            // Non-destructive: only assign entries that aren't already in a group.
+            for i in config.entries.indices where config.entries[i].groupID == nil {
+                guard let areaName = areas[config.entries[i].id], !areaName.isEmpty else { continue }
+                let groupID: UUID
+                if let existing = config.groups.first(where: { $0.name == areaName }) {
+                    groupID = existing.id
+                } else {
+                    let new = HomeAssistantWidget.Config.EntityGroup(name: areaName)
+                    config.groups.append(new)
+                    groupID = new.id
+                }
+                config.entries[i].groupID = groupID
+            }
+            saveConfig()
+        }
     }
 
     private func loadConfig() {
