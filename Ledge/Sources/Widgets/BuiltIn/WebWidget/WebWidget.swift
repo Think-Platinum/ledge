@@ -39,7 +39,15 @@ struct WebWidgetView: View {
     let configStore: WidgetConfigStore
 
     @State private var config = WebWidget.Config()
+    /// Bumped when the user script set has to change (custom CSS edit) —
+    /// forces a full WKWebView rebuild. Keep rare: a rebuild loses the
+    /// page's sessionStorage and any in-memory JS state, which can knock
+    /// the user back out of half-finished auth flows.
     @State private var refreshID = UUID()
+    /// Bumped on the auto-refresh timer to reload the current page without
+    /// tearing down the WKWebView. Cookies, sessionStorage, and the
+    /// underlying WebContent process are preserved.
+    @State private var reloadToken = 0
 
     var body: some View {
         Group {
@@ -47,7 +55,8 @@ struct WebWidgetView: View {
                 WebViewRepresentable(
                     url: url,
                     zoomLevel: config.zoomLevel,
-                    customCSS: config.customCSS.isEmpty ? nil : config.customCSS
+                    customCSS: config.customCSS.isEmpty ? nil : config.customCSS,
+                    reloadToken: reloadToken
                 )
                 .id(refreshID)
             } else {
@@ -69,13 +78,21 @@ struct WebWidgetView: View {
         .onAppear { loadConfig() }
         .onReceive(configStore.configDidChange) { changedID in
             if changedID == instanceID {
+                // URL and zoom changes flow through updateNSView without
+                // tearing down the WKWebView — that's what keeps cookies
+                // and in-memory session state intact. Only CSS edits
+                // require a rebuild, because custom CSS is delivered as a
+                // user script that can only be added at view-creation time.
+                let previousCSS = config.customCSS
                 loadConfig()
-                refreshID = UUID()  // Force reload with new config
+                if config.customCSS != previousCSS {
+                    refreshID = UUID()
+                }
             }
         }
         .onReceive(autoRefreshTimer) { _ in
             if config.autoRefreshMinutes > 0 {
-                refreshID = UUID()
+                reloadToken += 1
             }
         }
     }
