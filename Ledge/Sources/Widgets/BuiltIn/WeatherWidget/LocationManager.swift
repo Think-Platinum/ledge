@@ -23,8 +23,16 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     }
 
     func requestLocation() {
-        manager.requestWhenInUseAuthorization()
-        manager.requestLocation()
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.requestLocation()
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .denied, .restricted:
+            logger.info("Location access denied/restricted; manual mode required")
+        @unknown default:
+            manager.requestWhenInUseAuthorization()
+        }
     }
 
     // MARK: - CLLocationManagerDelegate
@@ -59,8 +67,11 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
             self.authorizationStatus = manager.authorizationStatus
-            if manager.authorizationStatus == .authorized {
+            switch manager.authorizationStatus {
+            case .authorizedWhenInUse, .authorizedAlways:
                 manager.requestLocation()
+            default:
+                break
             }
         }
     }

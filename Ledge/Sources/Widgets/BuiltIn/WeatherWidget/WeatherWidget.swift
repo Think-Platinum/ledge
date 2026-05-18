@@ -11,6 +11,7 @@ struct WeatherWidget {
         var locationMode: LocationMode = .auto
         var latitude: Double = 40.7128  // Default: New York
         var longitude: Double = -74.0060
+        var locationName: String?       // Resolved place name for manual mode (e.g. "Edinburgh, GB")
         var temperatureUnit: String = "celsius"
         var forecastDays: Int = 3
 
@@ -247,7 +248,7 @@ struct WeatherWidgetView: View {
         } else {
             lat = config.latitude
             lon = config.longitude
-            locationName = nil
+            locationName = config.locationName
         }
 
         Task {
@@ -276,6 +277,12 @@ struct WeatherSettingsView: View {
     let configStore: WidgetConfigStore
 
     @State private var config = WeatherWidget.Config()
+    @State private var searchQuery: String = ""
+    @State private var searchResults: [OpenMeteoGeocodingClient.Place] = []
+    @State private var isSearching: Bool = false
+    @State private var searchTask: Task<Void, Never>?
+
+    private let geocoder = OpenMeteoGeocodingClient()
 
     var body: some View {
         Form {
@@ -285,8 +292,7 @@ struct WeatherSettingsView: View {
             }
 
             if config.locationMode == .manual {
-                TextField("Latitude", value: $config.latitude, format: .number)
-                TextField("Longitude", value: $config.longitude, format: .number)
+                manualLocationSection
             }
 
             Picker("Temperature", selection: $config.temperatureUnit) {
@@ -298,10 +304,86 @@ struct WeatherSettingsView: View {
         }
         .onAppear { loadConfig() }
         .onChange(of: config.locationMode) { _, _ in saveConfig() }
-        .onChange(of: config.latitude) { _, _ in saveConfig() }
-        .onChange(of: config.longitude) { _, _ in saveConfig() }
         .onChange(of: config.temperatureUnit) { _, _ in saveConfig() }
         .onChange(of: config.forecastDays) { _, _ in saveConfig() }
+    }
+
+    @ViewBuilder
+    private var manualLocationSection: some View {
+        if let name = config.locationName {
+            HStack {
+                Image(systemName: "mappin.circle.fill")
+                    .foregroundColor(.accentColor)
+                Text(name)
+                    .font(.system(size: 13))
+                Spacer()
+                Button("Change") { config.locationName = nil }
+                    .buttonStyle(.borderless)
+            }
+        } else {
+            TextField("Search city (e.g. Edinburgh)", text: $searchQuery)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: searchQuery) { _, newValue in
+                    scheduleSearch(query: newValue)
+                }
+
+            if isSearching {
+                HStack {
+                    ProgressView().scaleEffect(0.6)
+                    Text("Searching…").font(.system(size: 12)).foregroundColor(.secondary)
+                }
+            } else if !searchResults.isEmpty {
+                ForEach(searchResults) { place in
+                    Button(action: { select(place: place) }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(place.name).font(.system(size: 13, weight: .medium))
+                                Text([place.admin1, place.country].compactMap { $0 }.joined(separator: ", "))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else if searchQuery.trimmingCharacters(in: .whitespaces).count >= 2 {
+                Text("No matches")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func scheduleSearch(query: String) {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else {
+            searchResults = []
+            isSearching = false
+            return
+        }
+        isSearching = true
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
+            if Task.isCancelled { return }
+            let results = await geocoder.search(query: trimmed)
+            if Task.isCancelled { return }
+            await MainActor.run {
+                searchResults = results
+                isSearching = false
+            }
+        }
+    }
+
+    private func select(place: OpenMeteoGeocodingClient.Place) {
+        config.latitude = place.latitude
+        config.longitude = place.longitude
+        config.locationName = place.shortLabel
+        searchQuery = ""
+        searchResults = []
+        saveConfig()
     }
 
     private func loadConfig() {
