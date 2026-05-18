@@ -320,6 +320,41 @@ class DisplayManager: ObservableObject {
     /// minute, long enough that the IOKit enumeration cost is negligible.
     private static let deviceIDRefreshInterval: TimeInterval = 60.0
 
+    // MARK: - Post-Restore Health Watchdog
+    //
+    // After a wake/restore the helper's fullscreen transition routinely never
+    // fires `didEnterFullScreenNotification` — the helper bounces fs=true →
+    // fs=false within ~1s and `revealPanel` runs off the fallback timeout.
+    // With no fullscreen Space on the Edge the menu bar stays visible there
+    // and the panel renders behind it, even though panel.level is
+    // `.screenSaver`.
+    //
+    // The watchdog re-asserts the panel/helper a few seconds after the
+    // initial reveal. If the helper isn't fullscreen on the Edge by then we
+    // tear it down and call `showPanel()` again. Heals are bounded per
+    // wake-cycle to prevent runaway loops if the underlying transition
+    // simply can't complete on this hardware right now.
+
+    /// How many self-heal attempts have run in the current wake-cycle.
+    /// Reset on every `screensDidWake` / `didWake` and on a successful
+    /// health check.
+    private var healAttemptCount: Int = 0
+
+    /// Hard cap on self-heal attempts per wake-cycle. Three gives the
+    /// transition multiple bites at the apple without spinning forever if
+    /// macOS refuses to ever complete the fullscreen entry.
+    private static let maxHealAttemptsPerWake: Int = 3
+
+    /// Health-check work items scheduled after `revealPanel-exit`. Tracked
+    /// so we can cancel pending checks when the panel is torn down or
+    /// hidden — otherwise a stale check fires against the next cycle.
+    private var pendingHealthChecks: [DispatchWorkItem] = []
+
+    /// Delays (seconds, relative to `revealPanel-exit`) at which the
+    /// watchdog re-verifies panel health. Two checks catch both "never
+    /// healthy" and "healthy then drifted" cases.
+    private static let healthCheckDelays: [TimeInterval] = [5.0, 15.0]
+
     // MARK: - Display-Change Debounce
     //
     // A single user action (toggle fullscreen, Hide/Show Panel, sleep/wake)
@@ -552,6 +587,13 @@ class DisplayManager: ObservableObject {
             }
         }
 
+        // Watchdog: re-verify the panel is actually on the Edge with a
+        // fullscreen helper a few seconds from now, and self-heal if not.
+        // This catches the wake case where the helper's fullscreen entry
+        // notification never arrives, the menu bar stays visible on the
+        // Edge, and the panel ends up rendered behind it.
+        schedulePostRestoreHealthChecks()
+
         logSnapshot("revealPanel-exit")
     }
 
@@ -598,6 +640,7 @@ class DisplayManager: ObservableObject {
         isActive = false
         // Explicit user dismiss — clear intent so reconnects don't auto-restore.
         wasActive = false
+        cancelPendingHealthChecks()
         tearDownFullscreenHelper()
         statusMessage = "Panel hidden (Xeneon Edge still connected)"
         logger.notice("hidePanel: orderOut called (hadPanel=\(hadPanel, privacy: .public))")
@@ -618,6 +661,7 @@ class DisplayManager: ObservableObject {
         hidTouchReader.panel = nil
         panel = nil
         isActive = false
+        cancelPendingHealthChecks()
         tearDownFullscreenHelper()
         logger.notice("Panel destroyed")
         logSnapshot("destroyPanel-exit")
@@ -1703,6 +1747,12 @@ class DisplayManager: ObservableObject {
         fullscreenEntryTimeout?.cancel()
         fullscreenEntryTimeout = nil
 
+        // Capture the start time so both the notification path and the
+        // timeout path can report how long the transition actually took.
+        // Without this we couldn't tell whether the notification "never
+        // fires" or just fires after our previous 2 s budget.
+        let started = Date()
+
         fullscreenObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didEnterFullScreenNotification,
             object: fullscreenHelper,
@@ -1716,6 +1766,8 @@ class DisplayManager: ObservableObject {
                 }
                 self.fullscreenEntryTimeout?.cancel()
                 self.fullscreenEntryTimeout = nil
+                let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+                self.logger.notice("Fullscreen entry completed in \(elapsedMs, privacy: .public) ms")
                 // Mark the helper as ready on the display it's now on.
                 if let id = self.fullscreenHelper?.screen?.displayID {
                     self.helperState = .ready(displayID: id)
@@ -1728,6 +1780,13 @@ class DisplayManager: ObservableObject {
         // Fallback timeout — cancellable. Fires once, only if the entry
         // notification didn't arrive first AND the timeout wasn't cancelled
         // by a new observation cycle starting up.
+        //
+        // 10 s (was 2 s). The 2 s budget was tripping on every wake — the
+        // log evidence showed the helper bouncing fs=true → fs=false within
+        // ~1 s and the notification never arriving. A longer budget plus
+        // explicit elapsed-time logging tells us whether the notification
+        // genuinely never fires or just runs late on wake.
+        let timeoutSeconds: TimeInterval = 10.0
         let timeout = DispatchWorkItem { [weak self] in
             guard let self else { return }
             // Re-check that the observer this timeout was paired with is
@@ -1739,11 +1798,16 @@ class DisplayManager: ObservableObject {
                 self.fullscreenObserver = nil
             }
             self.fullscreenEntryTimeout = nil
-            self.logger.warning("Fullscreen entry timed out — showing panel anyway")
+            let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            let helperFs = self.fullscreenHelper?.styleMask.contains(.fullScreen) ?? false
+            let helperFrame = self.fullscreenHelper.map { NSStringFromRect($0.frame) } ?? "nil"
+            let helperScreenID = self.fullscreenHelper?.screen?.displayID.map(String.init) ?? "nil"
+            let edgeID = self.xeneonScreen?.displayID.map(String.init) ?? "nil"
+            self.logger.warning("Fullscreen entry timed out after \(elapsedMs, privacy: .public) ms — helper.fs=\(helperFs, privacy: .public) helper.frame=\(helperFrame, privacy: .public) helper.displayID=\(helperScreenID, privacy: .public) edge.displayID=\(edgeID, privacy: .public). Showing panel anyway.")
             completion()
         }
         fullscreenEntryTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
     }
 
     /// Exit fullscreen and clean up the helper window.
@@ -1877,6 +1941,8 @@ class DisplayManager: ObservableObject {
                     self.securityEventCounts.screensDidWake += 1
                     self.logSnapshot("screensDidWake-entry")
                     self.unblankDisplay(reason: "displays woke")
+                    // Fresh wake-cycle — each wake gets its own retry budget.
+                    self.healAttemptCount = 0
                     // Edge often re-enumerates across a screen-sleep — refresh
                     // the touch device IDs so post-wake events match the filter.
                     self.refreshTouchDeviceIDs(reason: "displays woke")
@@ -1910,6 +1976,8 @@ class DisplayManager: ObservableObject {
                     self.securityEventCounts.didWake += 1
                     self.logSnapshot("didWake-entry")
                     self.unblankDisplay(reason: "system woke")
+                    // Fresh wake-cycle — each wake gets its own retry budget.
+                    self.healAttemptCount = 0
                     // System sleep also re-enumerates the Edge — refresh now,
                     // not 60s later, so touch is restored before the user
                     // notices it dropped.
@@ -2096,6 +2164,100 @@ class DisplayManager: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.logSnapshot("postWake+\(Int(delay))s(\(source))")
             }
+        }
+    }
+
+    // MARK: - Post-Restore Health Watchdog
+
+    /// Cancel any pending watchdog checks. Called when the panel is hidden
+    /// or destroyed — otherwise a stale check fires against a panel that no
+    /// longer corresponds to a user-visible state.
+    private func cancelPendingHealthChecks() {
+        for item in pendingHealthChecks {
+            item.cancel()
+        }
+        pendingHealthChecks.removeAll()
+    }
+
+    /// Schedule a pair of health checks after `revealPanel` completes. Each
+    /// check verifies the panel is actually on the Edge, frame-aligned, and
+    /// the helper is fullscreen there. On failure it runs one bounded heal
+    /// attempt via `triggerSelfHeal`.
+    private func schedulePostRestoreHealthChecks() {
+        cancelPendingHealthChecks()
+        for delay in Self.healthCheckDelays {
+            let item = DispatchWorkItem { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.runPanelHealthCheck(delay: delay)
+                }
+            }
+            pendingHealthChecks.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    /// One pass of the watchdog. Logs the result for observability and
+    /// triggers `triggerSelfHeal` if anything looks wrong AND the per-wake
+    /// retry budget hasn't been spent.
+    private func runPanelHealthCheck(delay: TimeInterval) {
+        let edge = xeneonScreen
+        let panelOnEdge =
+            panel != nil &&
+            panel?.isVisible == true &&
+            panel?.screen?.displayID != nil &&
+            panel?.screen?.displayID == edge?.displayID
+        let frameMatches: Bool = {
+            guard let panel, let edge else { return false }
+            return panel.frame == edge.frame
+        }()
+        let helperHealthy: Bool = {
+            guard let helper = fullscreenHelper, let edge else { return false }
+            return helper.styleMask.contains(.fullScreen)
+                && helper.screen?.displayID == edge.displayID
+        }()
+
+        let healthy = panelOnEdge && frameMatches && helperHealthy
+
+        let healthDetail = "panelOnEdge=\(panelOnEdge) frameMatches=\(frameMatches) helperHealthy=\(helperHealthy) healAttempts=\(healAttemptCount)/\(Self.maxHealAttemptsPerWake)"
+
+        if healthy {
+            logger.notice("Health check +\(Int(delay), privacy: .public)s OK — \(healthDetail, privacy: .public)")
+            healAttemptCount = 0
+            return
+        }
+
+        logger.warning("Health check +\(Int(delay), privacy: .public)s FAIL — \(healthDetail, privacy: .public)")
+        logSnapshot("healthCheckFail+\(Int(delay))s")
+
+        guard healAttemptCount < Self.maxHealAttemptsPerWake else {
+            logger.error("Self-heal budget exhausted (\(self.healAttemptCount, privacy: .public)/\(Self.maxHealAttemptsPerWake, privacy: .public)) — leaving panel as-is until next wake")
+            return
+        }
+
+        triggerSelfHeal()
+    }
+
+    /// Tear down the helper and rebuild the panel via `showPanel`. Bumps the
+    /// per-wake counter so we can stop if the underlying transition keeps
+    /// failing. `showPanel` re-schedules its own watchdog round on success.
+    private func triggerSelfHeal() {
+        guard let edge = xeneonScreen else {
+            logger.warning("Self-heal aborted — no Xeneon Edge screen available")
+            return
+        }
+        healAttemptCount += 1
+        logger.notice("Self-heal attempt \(self.healAttemptCount, privacy: .public)/\(Self.maxHealAttemptsPerWake, privacy: .public) — tearing down helper and re-running showPanel on \(edge.localizedName, privacy: .public)")
+        logSnapshot("selfHeal-entry")
+        cancelPendingHealthChecks()
+        tearDownFullscreenHelper { [weak self] in
+            guard let self else { return }
+            // Defensive: re-fetch in case the topology shifted under us.
+            guard self.xeneonScreen != nil else {
+                self.logger.warning("Self-heal aborted mid-flight — Xeneon Edge disappeared during teardown")
+                return
+            }
+            self.showPanel()
+            self.logSnapshot("selfHeal-exit")
         }
     }
 
