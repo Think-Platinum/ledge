@@ -141,7 +141,7 @@ struct HomeAssistantWidget {
 // MARK: - Cell layout
 
 /// LayoutValueKey carrying a card's column×row span through the layout pass.
-private struct CellSpanKey: LayoutValueKey {
+private nonisolated struct CellSpanKey: LayoutValueKey {
     static let defaultValue: (columns: Int, rows: Int) = (1, 1)
 }
 
