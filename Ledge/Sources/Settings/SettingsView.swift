@@ -1110,14 +1110,19 @@ struct InteractiveGridEditor: View {
                             selectedWidgetID = placement.id
                         }
                     )
-                    // highPriorityGesture: drag wins over the tap gesture so it starts
-                    // tracking immediately without waiting for tap disambiguation.
-                    .highPriorityGesture(
+                    // Body drag uses normal-priority .gesture so the handle's
+                    // .highPriorityGesture (inside the body) can still take
+                    // precedence when the user clicks on the corner handle.
+                    //
+                    // SwiftUI rule: when a parent uses .highPriorityGesture, it
+                    // beats child gestures even if those are also high-priority.
+                    // So the body MUST be normal-priority for the handle to win.
+                    // The .simultaneousGesture(TapGesture()) above already
+                    // prevents tap-vs-drag disambiguation delay, so we don't
+                    // need high-priority on the body for that reason any more.
+                    .gesture(
                         DragGesture(minimumDistance: 3)
                             .onChanged { value in
-                                // DIAGNOSTIC — remove once confirmed working:
-                                // print("BODY onChanged: translation=\(value.translation), resizingID=\(String(describing: resizingWidgetID))")
-
                                 // Ignore body-drag events when a resize is in progress
                                 // (the resize handle sits inside the widget frame).
                                 guard resizingWidgetID == nil else { return }
