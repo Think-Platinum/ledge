@@ -240,6 +240,136 @@
   }
 
   /* ===========================================================
+     Date & Time widget — multiple timezones, multiple styles. */
+  .datetime-widget {
+    width: 100%; height: 100%;
+    color: white;
+    padding: 10px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .datetime-widget.style-minimal {
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+  }
+  .datetime-widget.style-analog {
+    align-items: center;
+    justify-content: center;
+  }
+  .datetime-widget.layout-horizontal {
+    flex-direction: row;
+    gap: 12px;
+  }
+  .dt-main { flex: 0 0 auto; }
+  .datetime-widget.layout-horizontal .dt-main {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .dt-time {
+    font-weight: 300;
+    line-height: 1;
+    color: white;
+    text-align: center;
+  }
+  .datetime-widget.layout-horizontal .dt-time { text-align: left; }
+  .dt-date {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    color: rgba(255,255,255,0.65);
+    font-weight: 400;
+    text-align: center;
+    margin-top: 4px;
+  }
+  .datetime-widget.layout-horizontal .dt-date { text-align: left; }
+  .dt-divider {
+    height: 1px;
+    background: rgba(255,255,255,0.12);
+    margin: 6px 0;
+  }
+  .datetime-widget.layout-horizontal .dt-divider {
+    width: 1px; height: auto; margin: 0;
+  }
+  .dt-zones {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+  .datetime-widget.layout-horizontal .dt-zones {
+    justify-content: center;
+    gap: 3px;
+  }
+  .dt-zone-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: rgba(255,255,255,0.85);
+  }
+  .dt-zone-row .city {
+    min-width: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255,255,255,0.7);
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-weight: 500;
+  }
+  .dt-zone-row .time {
+    flex: 1 1 auto;
+    text-align: right;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: white;
+  }
+  .dt-zone-row .offset {
+    min-width: 32px;
+    text-align: right;
+    color: rgba(255,255,255,0.5);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .datetime-widget.layout-horizontal .dt-zone-row .offset { display: none; }
+  .dt-analog {
+    width: 80%; aspect-ratio: 1;
+    max-width: 100%; max-height: 100%;
+    border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.8);
+    position: relative;
+    background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.05), transparent);
+  }
+  .dt-analog::before, .dt-analog::after, .dt-analog .sec {
+    content: '';
+    position: absolute;
+    left: 50%; top: 50%;
+    background: white;
+    transform-origin: 50% 100%;
+    border-radius: 2px;
+  }
+  .dt-analog::before { /* hour hand */
+    width: 4px; height: 28%;
+    transform: translate(-50%, -100%) rotate(60deg);
+  }
+  .dt-analog::after { /* minute hand */
+    width: 3px; height: 38%;
+    transform: translate(-50%, -100%) rotate(180deg);
+  }
+  .dt-analog .sec {
+    width: 1px; height: 42%;
+    background: #f87171;
+    transform: translate(-50%, -100%) rotate(270deg);
+  }
+  body.show-text-boundaries .dt-time,
+  body.show-text-boundaries .dt-date,
+  body.show-text-boundaries .dt-zone-row {
+    outline: 1px dashed rgba(99, 191, 230, 0.85);
+    outline-offset: -1px;
+    background: rgba(99, 191, 230, 0.06);
+  }
+
+  /* ===========================================================
      Weather widget */
   .weather-widget {
     width: 100%; height: 100%;
@@ -282,37 +412,48 @@
     display: flex; flex-direction: column; gap: 10px;
   }
   .weather-widget.full .hero {
-    display: flex; align-items: center; gap: 14px;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 16px;
   }
   .weather-widget.full .hero .text-stack {
     flex: 1 1 auto; min-width: 0;
-    display: flex; flex-direction: column; gap: 2px;
+    display: flex; flex-direction: column; gap: 3px;
   }
+  /* Details column — pinned to the trailing edge of the hero row,
+     stacked vertically. Each item is icon + value (no label, per Swift). */
   .weather-widget.full .details {
-    display: flex; gap: 16px;
-    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    font-size: 15px;
     color: rgba(255,255,255,0.8);
+    flex: 0 0 auto;
   }
-  .weather-widget.full .details .item { display: flex; align-items: center; gap: 5px; }
+  .weather-widget.full .details .item {
+    display: flex; align-items: center; gap: 5px;
+  }
   .weather-widget.full .details .icon { font-size: 14px; opacity: 0.7; }
   .weather-divider {
     height: 1px;
     background: rgba(255,255,255,0.12);
-    margin: 2px 0;
+    margin: 2px 16px;
   }
   .weather-widget.full .forecast {
-    display: flex; gap: 4px;
+    display: flex; gap: 0;
+    padding: 0 12px;
   }
   .weather-widget.full .forecast .day {
     flex: 1 1 0; min-width: 0;
     display: flex; flex-direction: column;
-    align-items: center; gap: 2px;
-    font-size: 11px;
+    align-items: center; gap: 5px;
+    font-size: 13px;
     color: rgba(255,255,255,0.7);
   }
-  .weather-widget.full .forecast .day .day-name { color: rgba(255,255,255,0.55); }
-  .weather-widget.full .forecast .day .day-icon { font-size: 18px; line-height: 1; }
-  .weather-widget.full .forecast .day .day-temp { color: white; font-weight: 500; }
+  .weather-widget.full .forecast .day .day-name { color: rgba(255,255,255,0.55); font-size: 13px; }
+  .weather-widget.full .forecast .day .day-icon { font-size: 20px; line-height: 1; }
+  .weather-widget.full .forecast .day .day-max { color: rgba(255,255,255,0.85); font-weight: 500; font-size: 14px; }
+  .weather-widget.full .forecast .day .day-min { color: rgba(255,255,255,0.55); font-size: 13px; }
 
   /* ===========================================================
      System Audio widget */
@@ -967,16 +1108,19 @@ const ClockWidget = {
 const WEATHER_SWIFT = {
   // Thresholds from WeatherWidget.swift.
   compactIfHeightBelow: 150,
-  forecastMinWidthPerDay: 50,   // each forecast day wants ≥ this much width
+  forecastMinWidthPerDay: 50,    // each forecast day wants ≥ this much width
+  forecastNarrowCap: 5,          // at width < 400, cap at 5 days even if width allows more
+  forecastNarrowThreshold: 400,
+  maxForecastDays: 7,            // OpenMeteo returns up to 7 days
 };
 
 const WeatherWidget = {
   name: 'Weather',
   descriptor: { min: [3,2], default: [4,3], max: [4,3] },
-  defaultConfig: { forecastDays: 5, units: 'C' },
+  defaultConfig: { forecastDays: 7, units: 'C' },
   configUI: `
-    <label class="check">Forecast days
-      <input type="number" min="1" max="5" data-cfg="forecastDays" style="width:50px;margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px" />
+    <label class="check">Forecast days (max)
+      <input type="number" min="1" max="7" data-cfg="forecastDays" style="width:50px;margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px" />
     </label>
     <label class="check">Units
       <select data-cfg="units" style="margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px">
@@ -987,53 +1131,73 @@ const WeatherWidget = {
   `,
   compute(w, h, cfg) {
     const tier = h < WEATHER_SWIFT.compactIfHeightBelow ? 'compact' : 'full';
-    // Forecast days are dynamic — capped by user pref AND by width per day.
-    const maxByWidth = Math.max(1, Math.floor((w - 32) / WEATHER_SWIFT.forecastMinWidthPerDay));
-    const forecastDays = Math.min(cfg.forecastDays, maxByWidth, 5);
-    return { w, h, cfg, tier, forecastDays };
+    // Mirrors WeatherWidget.swift fullView lines 167-169:
+    //   rawMaxDays = max(1, Int(width / 50))
+    //   maxDays    = width < 400 ? min(rawMaxDays, 5) : rawMaxDays
+    //   daysToShow = min(weather.dailyForecast.count, maxDays)
+    // Here `cfg.forecastDays` substitutes for `weather.dailyForecast.count`.
+    const rawMaxByWidth = Math.max(1, Math.floor(w / WEATHER_SWIFT.forecastMinWidthPerDay));
+    const maxByWidth = w < WEATHER_SWIFT.forecastNarrowThreshold
+      ? Math.min(rawMaxByWidth, WEATHER_SWIFT.forecastNarrowCap)
+      : rawMaxByWidth;
+    const forecastDays = Math.min(cfg.forecastDays, maxByWidth, WEATHER_SWIFT.maxForecastDays);
+    return { w, h, cfg, tier, forecastDays, maxByWidth };
   },
   render(layout) {
-    const tempUnit = layout.cfg.units;
-    const temp = tempUnit === 'C' ? '21°' : '70°';
+    const u = layout.cfg.units === 'F' ? '°F' : '°C';
+    const cur = layout.cfg.units === 'F' ? '64' : '18';
+    const feels = layout.cfg.units === 'F' ? '59' : '15';
+
     if (layout.tier === 'compact') {
       return `
         <div class="weather-widget compact">
           <div class="row">
-            <div class="weather-icon" style="font-size:36px">☀️</div>
+            <div class="weather-icon" style="font-size:36px">☁️</div>
             <div class="text-stack">
-              <div class="weather-temp" style="font-size:32px">${temp}</div>
-              <div class="weather-condition" style="font-size:15px">Sunny</div>
+              <div class="weather-temp" style="font-size:32px">${cur}${u}</div>
+              <div class="weather-condition" style="font-size:15px">Overcast</div>
             </div>
             <div class="weather-location location-right" style="font-size:13px">London</div>
           </div>
         </div>
       `;
     }
-    const days = ['Mon','Tue','Wed','Thu','Fri'].slice(0, layout.forecastDays);
-    const dayIcons = ['☀️','⛅','🌧','⛈','🌤'];
-    const dayTemps = ['22°','19°','17°','15°','20°'];
+
+    // Sample 7-day forecast — sliced to layout.forecastDays at render time.
+    const SAMPLE = [
+      { day: 'Wed', icon: '🌧',  max: '19', min: '13' },
+      { day: 'Thu', icon: '☁️', max: '22', min: '12' },
+      { day: 'Fri', icon: '⛅', max: '27', min: '16' },
+      { day: 'Sat', icon: '☁️', max: '27', min: '20' },
+      { day: 'Sun', icon: '☀️', max: '31', min: '19' },
+      { day: 'Mon', icon: '☀️', max: '29', min: '21' },
+      { day: 'Tue', icon: '☀️', max: '21', min: '13' },
+    ];
+    const days = SAMPLE.slice(0, layout.forecastDays);
+
     return `
       <div class="weather-widget full">
         <div class="hero">
-          <div class="weather-icon" style="font-size:52px">☀️</div>
+          <div class="weather-icon" style="font-size:52px">☁️</div>
           <div class="text-stack">
-            <div class="weather-temp" style="font-size:48px">${temp}</div>
-            <div class="weather-condition" style="font-size:18px">Sunny</div>
-            <div class="weather-location" style="font-size:13px">London, UK</div>
+            <div class="weather-temp" style="font-size:48px">${cur}${u}</div>
+            <div class="weather-condition" style="font-size:18px">Overcast</div>
+            <div class="weather-location" style="font-size:14px">London, GB</div>
           </div>
-        </div>
-        <div class="details">
-          <div class="item"><span class="icon">🌡</span>Feels 19°</div>
-          <div class="item"><span class="icon">💧</span>52%</div>
-          <div class="item"><span class="icon">💨</span>12 km/h</div>
+          <div class="details">
+            <div class="item"><span class="icon">🌡</span>${feels}${u}</div>
+            <div class="item"><span class="icon">💧</span>55%</div>
+            <div class="item"><span class="icon">💨</span>22 km/h</div>
+          </div>
         </div>
         <div class="weather-divider"></div>
         <div class="forecast">
-          ${days.map((d, i) => `
+          ${days.map(d => `
             <div class="day">
-              <div class="day-name">${d}</div>
-              <div class="day-icon">${dayIcons[i]}</div>
-              <div class="day-temp">${dayTemps[i]}</div>
+              <div class="day-name">${d.day}</div>
+              <div class="day-icon">${d.icon}</div>
+              <div class="day-max">${d.max}${u}</div>
+              <div class="day-min">${d.min}${u}</div>
             </div>
           `).join('')}
         </div>
@@ -1047,16 +1211,19 @@ const WeatherWidget = {
       { name: 'Weather Icon', visible: true, dims: c ? '36pt' : '52pt' },
       { name: 'Temperature', visible: true, dims: c ? '32pt' : '48pt' },
       { name: 'Condition', visible: true, dims: c ? '15pt' : '18pt' },
-      { name: 'Location', visible: true, dims: c ? '13pt (right)' : '13pt' },
-      { name: 'Details Row', visible: f, dims: f ? '13pt × 3 items' : '—' },
+      { name: 'Location', visible: true, dims: c ? '13pt (right)' : '14pt' },
+      { name: 'Feels-like', visible: f, dims: f ? '15pt + thermometer icon' : '—' },
+      { name: 'Humidity', visible: f, dims: f ? '15pt + droplet icon' : '—' },
+      { name: 'Wind', visible: f, dims: f ? '15pt + wind icon' : '—' },
       { name: 'Divider', visible: f, dims: f ? '1pt' : '—' },
-      { name: 'Forecast Days', visible: f && layout.forecastDays > 0, dims: f ? `${layout.forecastDays} day${layout.forecastDays > 1 ? 's' : ''}` : '—' },
+      { name: 'Forecast Days', visible: f && layout.forecastDays > 0, dims: f ? `${layout.forecastDays} day${layout.forecastDays > 1 ? 's' : ''} (max/min temps)` : '—' },
     ];
   },
   info(layout) {
     return [
-      { label: 'Forecast days', value: `${layout.forecastDays} (cap: ${layout.cfg.forecastDays}, width: ${Math.floor((layout.w - 32) / 50)})` },
-      { label: 'Threshold', value: 'h ≥ 150pt → full' },
+      { label: 'Forecast days', value: `${layout.forecastDays} (cap pref: ${layout.cfg.forecastDays}, width allows: ${layout.maxByWidth})` },
+      { label: 'Width cap rule', value: 'w < 400pt → max 5 days; else width/50' },
+      { label: 'Tier threshold', value: 'h ≥ 150pt → full' },
     ];
   },
   subTier: (layout) => layout.tier === 'full' ? `${layout.forecastDays}-day` : 'condensed',
