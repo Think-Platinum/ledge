@@ -220,26 +220,6 @@
   }
 
   /* ===========================================================
-     Clock widget — fluid layout, time + optional date, centred. */
-  .clock-widget {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 100%; height: 100%;
-    color: white;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    padding: 8px;
-    gap: 4px;
-  }
-  .clock-time { font-weight: 200; line-height: 1; }
-  .clock-date {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    color: rgba(255,255,255,0.6);
-    font-weight: 400;
-  }
-
-  /* ===========================================================
      Date & Time widget — multiple timezones, multiple styles. */
   .datetime-widget {
     width: 100%; height: 100%;
@@ -630,8 +610,6 @@
   }
 
   /* Common touch-surface coverage for the new widgets' buttons + sliders */
-  body.show-text-boundaries .clock-time,
-  body.show-text-boundaries .clock-date,
   body.show-text-boundaries .weather-temp,
   body.show-text-boundaries .weather-condition,
   body.show-text-boundaries .weather-location,
@@ -858,7 +836,7 @@
   <label>Widget:
     <select id="widget-type">
       <option value="spotify">Spotify</option>
-      <option value="clock">Clock</option>
+      <option value="dateTime">Date & Time</option>
       <option value="weather">Weather</option>
       <option value="systemAudio">System Audio</option>
       <option value="homeAssistant">Home Assistant</option>
@@ -1049,56 +1027,242 @@ function spotifyRenderToString(layout) {
 }
 
 // ===========================================================================
-// CLOCK WIDGET MODULE
+// DATE & TIME WIDGET MODULE
 // ===========================================================================
+//
+// Mirrors DateTimeWidget.swift. Tier-routed by height:
+//   compact (h<150) — time only, OR time+date+zones in a horizontal split if
+//                     width ≥ 350 AND additional zones are configured.
+//   medium  (150 ≤ h < 250) — vertical time + date + 1-3 zones (3 if h≥200).
+//   large   (h ≥ 250)  — vertical time + date + 3-4 zones (4 if h≥320).
+// Styles: digital / analog / minimal / retro. Minimal ignores date+zones;
+// analog renders a clock face and ignores them too.
 
-const ClockWidget = {
-  name: 'Clock',
-  descriptor: { min: [2,2], default: [4,4], max: [6,6] },
-  defaultConfig: { showDate: true, showSeconds: false },
+// Common timezone presets — IANA identifier + display label + sample HH:mm
+// in that zone (relative to a fixed sample local time of 14:23).
+const DT_TZ_PRESETS = [
+  { id: 'America/New_York',     city: 'New York',    offset: -5, time: '09:23' },
+  { id: 'America/Los_Angeles',  city: 'Los Angeles', offset: -8, time: '06:23' },
+  { id: 'Europe/London',        city: 'London',       offset:  0, time: '14:23' },
+  { id: 'Europe/Paris',         city: 'Paris',        offset:  1, time: '15:23' },
+  { id: 'Asia/Tokyo',           city: 'Tokyo',        offset:  9, time: '23:23' },
+  { id: 'Asia/Singapore',       city: 'Singapore',    offset:  8, time: '22:23' },
+  { id: 'Australia/Sydney',     city: 'Sydney',      offset: 11, time: '01:23' },
+];
+function dtTZByID(id) { return DT_TZ_PRESETS.find(t => t.id === id); }
+function dtOffsetLabel(offset) {
+  if (offset === 0) return '=';
+  return (offset > 0 ? '+' : '') + offset + 'h';
+}
+
+const DateTimeWidget = {
+  name: 'Date & Time',
+  descriptor: { min: [3,2], default: [4,4], max: [8,6] },
+  defaultConfig: {
+    style: 'digital',                  // digital | analog | minimal | retro
+    use24Hour: true,
+    showSeconds: true,
+    showDate: true,
+    primaryTimezone: '',               // '' = system local
+    additionalCount: 2,                // sandbox shorthand for additionalTimezones[]
+  },
   configUI: `
+    <label class="check">Style
+      <select data-cfg="style" style="margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px">
+        <option value="digital">Digital</option>
+        <option value="analog">Analog</option>
+        <option value="minimal">Minimal</option>
+        <option value="retro">Retro</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" data-cfg="use24Hour" /> 24-hour format</label>
+    <label class="check"><input type="checkbox" data-cfg="showSeconds" /> Show seconds</label>
     <label class="check"><input type="checkbox" data-cfg="showDate" /> Show date</label>
-    <label class="check"><input type="checkbox" data-cfg="showSeconds" /> Show seconds (mockup)</label>
+    <label class="check">Primary timezone
+      <select data-cfg="primaryTimezone" style="margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:11px;max-width:130px">
+        <option value="">Local (system)</option>
+        <option value="America/New_York">New York</option>
+        <option value="America/Los_Angeles">Los Angeles</option>
+        <option value="Europe/London">London</option>
+        <option value="Europe/Paris">Paris</option>
+        <option value="Asia/Tokyo">Tokyo</option>
+        <option value="Asia/Singapore">Singapore</option>
+        <option value="Australia/Sydney">Sydney</option>
+      </select>
+    </label>
+    <label class="check">Additional zones (max 4)
+      <input type="number" min="0" max="4" data-cfg="additionalCount" style="width:50px;margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px" />
+    </label>
   `,
   compute(w, h, cfg) {
-    // Mirrors SwiftUI's .minimumScaleFactor(0.3) behaviour for the time text.
-    // Swift uses .system(size: 56). We compute an effective scaled size based
-    // on the widget area so the mockup matches what the real widget produces.
-    const targetTimeFont = 56;
-    const dateFont = cfg.showDate ? 16 : 0;
-    // Approximate width of "14:23" at the target font (5 chars × ~0.6 of font width)
+    // Tier routing — mirrors DateTimeWidget.swift calculateLayout (height-driven).
+    let tier;
+    if (h < 150)      tier = 'compact';
+    else if (h < 250) tier = 'medium';
+    else              tier = 'large';
+
+    // How many additional zones can this tier render?
+    let maxAdditional;
+    if (tier === 'compact') {
+      // In compact tier zones only render if widget is wide enough AND the
+      // user has configured some — and even then in the horizontal sub-layout
+      // we show at most 3.
+      maxAdditional = w >= 350 ? Math.min(3, cfg.additionalCount) : 0;
+    } else if (tier === 'medium') {
+      maxAdditional = h >= 200 ? Math.min(3, cfg.additionalCount) : Math.min(1, cfg.additionalCount);
+    } else {
+      maxAdditional = h >= 320 ? Math.min(4, cfg.additionalCount) : Math.min(3, cfg.additionalCount);
+    }
+
+    // Compact tier picks a sub-layout: horizontal (time+date | zones) if
+    // wide enough AND has zones; vertical (time only) otherwise.
+    let compactLayout = null;
+    if (tier === 'compact') {
+      compactLayout = (w >= 350 && maxAdditional > 0) ? 'horizontal' : 'vertical-time-only';
+    }
+
+    // Font sizes — tier-scaled, mirroring the Swift size table.
+    const timeFontMax = tier === 'compact' ? 44 : tier === 'medium' ? 60 : 72;
+    const dateFont    = tier === 'compact' ? 12 : tier === 'medium' ? 14 : 18;
+    const zoneFont    = tier === 'compact' ? 12 : tier === 'medium' ? 14 : 16;
+
+    // Scale the time font to fit within the available width (a coarse mirror
+    // of SwiftUI's .minimumScaleFactor — the real widget uses the same
+    // approach to keep the time readable on narrow widgets).
     const sampleStr = cfg.showSeconds ? '14:23:42' : '14:23';
-    const targetTextWidth = sampleStr.length * targetTimeFont * 0.55;
-    const usableW = w - 24, usableH = h - 24 - (cfg.showDate ? dateFont + 8 : 0);
-    const scaleW = usableW / targetTextWidth;
-    const scaleH = usableH / targetTimeFont;
-    const scale = Math.max(0.3, Math.min(1.0, Math.min(scaleW, scaleH)));
-    const timeFont = targetTimeFont * scale;
-    return { w, h, cfg, timeFont, dateFont, sampleStr };
+    const targetTextWidth = sampleStr.length * timeFontMax * 0.55;
+    const usableW = (compactLayout === 'horizontal' ? (w * 0.5) : w) - 24;
+    const scale = Math.max(0.4, Math.min(1.0, usableW / targetTextWidth));
+    const timeFont = timeFontMax * scale;
+
+    return {
+      w, h, cfg, tier, compactLayout,
+      maxAdditional, timeFont, dateFont, zoneFont, sampleStr,
+    };
   },
   render(layout) {
+    const cfg = layout.cfg;
+    // Style overrides — Minimal & Analog ignore the tier-routing layout.
+    if (cfg.style === 'minimal') {
+      // Centred time, nothing else.
+      const fittedFont = Math.min(layout.w * 0.28, layout.h * 0.7, 120);
+      return `
+        <div class="datetime-widget style-minimal">
+          <div class="dt-time" style="font-size:${fittedFont}px">${layout.sampleStr}</div>
+        </div>
+      `;
+    }
+    if (cfg.style === 'analog') {
+      return `
+        <div class="datetime-widget style-analog">
+          <div class="dt-analog"><div class="sec"></div></div>
+        </div>
+      `;
+    }
+
+    // Digital / Retro share the same tier-driven structure.
+    const primaryCity = cfg.primaryTimezone ? (dtTZByID(cfg.primaryTimezone)?.city || 'Local') : 'Local';
+    const dateStr = `Tuesday, 20 May`;
+    const additionalZones = DT_TZ_PRESETS
+      .filter(t => t.id !== cfg.primaryTimezone)
+      .slice(0, layout.maxAdditional);
+
+    const zonesHTML = additionalZones.map(z => `
+      <div class="dt-zone-row" style="font-size:${layout.zoneFont}px">
+        <span class="city">${z.city}</span>
+        <span class="time">${z.time}</span>
+        <span class="offset" style="font-size:${Math.round(layout.zoneFont * 0.85)}px">${dtOffsetLabel(z.offset)}</span>
+      </div>
+    `).join('');
+
+    if (layout.tier === 'compact') {
+      if (layout.compactLayout === 'horizontal') {
+        return `
+          <div class="datetime-widget style-${cfg.style} layout-horizontal">
+            <div class="dt-main">
+              <div class="dt-time" style="font-size:${layout.timeFont}px">${layout.sampleStr}</div>
+              ${cfg.showDate ? `<div class="dt-date" style="font-size:${layout.dateFont}px">${dateStr}</div>` : ''}
+            </div>
+            <div class="dt-divider"></div>
+            <div class="dt-zones">${zonesHTML}</div>
+          </div>
+        `;
+      }
+      // vertical, time only
+      return `
+        <div class="datetime-widget style-${cfg.style}" style="align-items:center;justify-content:center">
+          <div class="dt-time" style="font-size:${layout.timeFont}px">${layout.sampleStr}</div>
+        </div>
+      `;
+    }
+
+    // Medium / large — vertical layout with optional date + zones.
     return `
-      <div class="clock-widget">
-        <div class="clock-time" style="font-size:${layout.timeFont}px">${layout.sampleStr}</div>
-        ${layout.cfg.showDate ? `<div class="clock-date" style="font-size:${layout.dateFont}px">Tuesday, May 20</div>` : ''}
+      <div class="datetime-widget style-${cfg.style}" style="align-items:center;justify-content:center">
+        <div class="dt-time" style="font-size:${layout.timeFont}px">${layout.sampleStr}</div>
+        ${cfg.showDate ? `<div class="dt-date" style="font-size:${layout.dateFont}px">${dateStr}</div>` : ''}
+        ${layout.maxAdditional > 0 ? '<div class="dt-divider" style="width:80%"></div>' : ''}
+        ${layout.maxAdditional > 0 ? `<div class="dt-zones" style="width:100%;padding:0 16px;flex:0 0 auto">${zonesHTML}</div>` : ''}
       </div>
     `;
   },
   inspect(layout) {
-    return [
-      { name: 'Time', visible: true, dims: `${Math.round(layout.timeFont)}pt (target 56, scale ${(layout.timeFont/56).toFixed(2)})` },
-      { name: 'Date', visible: layout.cfg.showDate, dims: layout.cfg.showDate ? `${layout.dateFont}pt` : '—' },
-      { name: 'Seconds', visible: layout.cfg.showSeconds, dims: layout.cfg.showSeconds ? 'inline' : '—' },
-    ];
+    const cfg = layout.cfg;
+    const elements = [];
+    if (cfg.style === 'minimal') {
+      elements.push({ name: 'Time (minimal)', visible: true, dims: 'fills widget' });
+      elements.push({ name: 'Date',  visible: false, dims: '— (style ignores)' });
+      elements.push({ name: 'Zones', visible: false, dims: '— (style ignores)' });
+      return elements;
+    }
+    if (cfg.style === 'analog') {
+      elements.push({ name: 'Clock face', visible: true, dims: '80% of widget' });
+      elements.push({ name: 'Second hand', visible: cfg.showSeconds, dims: cfg.showSeconds ? 'rendered' : '—' });
+      elements.push({ name: 'Date',  visible: false, dims: '— (style ignores)' });
+      elements.push({ name: 'Zones', visible: false, dims: '— (style ignores)' });
+      return elements;
+    }
+    elements.push({ name: 'Time', visible: true, dims: `${Math.round(layout.timeFont)}pt (target ${layout.tier === 'compact' ? 44 : layout.tier === 'medium' ? 60 : 72})` });
+    const dateVisible = cfg.showDate && (layout.tier !== 'compact' || layout.compactLayout === 'horizontal');
+    elements.push({ name: 'Date', visible: dateVisible, dims: dateVisible ? `${layout.dateFont}pt` : (layout.tier === 'compact' && layout.compactLayout === 'vertical-time-only' ? '— (compact w<350)' : '—') });
+    elements.push({ name: 'Divider', visible: layout.maxAdditional > 0, dims: layout.maxAdditional > 0 ? '1pt' : '—' });
+    for (let i = 0; i < 4; i++) {
+      const shown = i < layout.maxAdditional;
+      const tz = shown
+        ? DT_TZ_PRESETS.filter(t => t.id !== cfg.primaryTimezone)[i]
+        : null;
+      elements.push({
+        name: `Zone ${i + 1}${tz ? ` — ${tz.city}` : ''}`,
+        visible: shown,
+        dims: shown ? `${layout.zoneFont}pt` : (i < cfg.additionalCount ? '— (no room at this tier)' : '— (not configured)'),
+      });
+    }
+    return elements;
   },
   info(layout) {
-    return [
-      { label: 'Layout', value: 'fluid (no tier branching)' },
-      { label: 'Time font', value: `${Math.round(layout.timeFont)}pt (scaled from 56pt)` },
-      { label: 'Date font', value: layout.cfg.showDate ? `${layout.dateFont}pt` : 'hidden' },
-    ];
+    const cfg = layout.cfg;
+    const f = [];
+    f.push({ label: 'Style', value: cfg.style });
+    if (cfg.style === 'digital' || cfg.style === 'retro') {
+      f.push({ label: 'Tier rule', value: 'h<150 compact / h<250 medium / else large' });
+      f.push({ label: 'Sub-layout', value: layout.compactLayout || 'vertical' });
+      f.push({ label: 'Time font', value: `${Math.round(layout.timeFont)}pt` });
+      f.push({ label: 'Zones shown', value: `${layout.maxAdditional} of ${cfg.additionalCount} configured` });
+    } else if (cfg.style === 'minimal') {
+      f.push({ label: 'Mode', value: 'fullscreen centred time' });
+    } else {
+      f.push({ label: 'Mode', value: 'analog clock face' });
+    }
+    return f;
   },
-  subTier: () => 'fluid',
+  subTier: (layout) => {
+    if (layout.cfg.style === 'minimal') return 'minimal';
+    if (layout.cfg.style === 'analog')  return 'analog';
+    let s = layout.tier;
+    if (layout.compactLayout) s += ' · ' + layout.compactLayout;
+    if (layout.maxAdditional > 0) s += ` · ${layout.maxAdditional}-zone`;
+    return s;
+  },
 };
 
 // ===========================================================================
@@ -1466,7 +1630,7 @@ const HomeAssistantWidget = {
 
 const WIDGETS = {
   spotify:       SpotifyWidget,
-  clock:         ClockWidget,
+  dateTime:      DateTimeWidget,
   weather:       WeatherWidget,
   systemAudio:   SystemAudioWidget,
   homeAssistant: HomeAssistantWidget,
