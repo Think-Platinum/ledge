@@ -664,7 +664,6 @@ struct AddWidgetSheet: View {
         "com.ledge.system-audio": .media,
         "com.ledge.google-meet": .media,
         "com.ledge.calendar": .productivity,
-        "com.ledge.clock": .info,
         "com.ledge.datetime": .info,
         "com.ledge.weather": .info,
         "com.ledge.system-performance": .system,

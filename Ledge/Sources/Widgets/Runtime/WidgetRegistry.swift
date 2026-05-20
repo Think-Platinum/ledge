@@ -48,7 +48,6 @@ class WidgetRegistry {
 
     /// Register all built-in widgets. Called once at app startup.
     func registerBuiltInWidgets() {
-        register(ClockWidget.descriptor)
         register(DateTimeWidget.descriptor)
         register(SpotifyWidget.descriptor)
         register(CalendarWidget.descriptor)
