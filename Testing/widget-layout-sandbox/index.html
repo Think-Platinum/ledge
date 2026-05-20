@@ -219,6 +219,289 @@
     background: rgba(255, 138, 76, 0.2);
   }
 
+  /* ===========================================================
+     Clock widget — fluid layout, time + optional date, centred. */
+  .clock-widget {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%; height: 100%;
+    color: white;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 8px;
+    gap: 4px;
+  }
+  .clock-time { font-weight: 200; line-height: 1; }
+  .clock-date {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    color: rgba(255,255,255,0.6);
+    font-weight: 400;
+  }
+
+  /* ===========================================================
+     Weather widget */
+  .weather-widget {
+    width: 100%; height: 100%;
+    color: white;
+    padding: 14px;
+    box-sizing: border-box;
+  }
+  .weather-widget.compact { padding: 14px; }
+  .weather-widget.full { padding: 16px; }
+
+  .weather-icon {
+    color: white;
+    text-shadow: 0 0 4px rgba(0,0,0,0.3);
+    flex: 0 0 auto;
+    line-height: 1;
+    text-align: center;
+  }
+  .weather-temp { font-weight: 200; line-height: 1; }
+  .weather-condition { color: rgba(255,255,255,0.85); }
+  .weather-location {
+    color: rgba(255,255,255,0.6);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .weather-widget.compact .row {
+    display: flex; align-items: center; gap: 12px;
+    height: 100%;
+  }
+  .weather-widget.compact .text-stack {
+    display: flex; flex-direction: column; gap: 2px;
+    min-width: 0;
+  }
+  .weather-widget.compact .location-right {
+    margin-left: auto;
+    text-align: right;
+    color: rgba(255,255,255,0.65);
+  }
+  .weather-widget.full {
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .weather-widget.full .hero {
+    display: flex; align-items: center; gap: 14px;
+  }
+  .weather-widget.full .hero .text-stack {
+    flex: 1 1 auto; min-width: 0;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .weather-widget.full .details {
+    display: flex; gap: 16px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.8);
+  }
+  .weather-widget.full .details .item { display: flex; align-items: center; gap: 5px; }
+  .weather-widget.full .details .icon { font-size: 14px; opacity: 0.7; }
+  .weather-divider {
+    height: 1px;
+    background: rgba(255,255,255,0.12);
+    margin: 2px 0;
+  }
+  .weather-widget.full .forecast {
+    display: flex; gap: 4px;
+  }
+  .weather-widget.full .forecast .day {
+    flex: 1 1 0; min-width: 0;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 2px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.7);
+  }
+  .weather-widget.full .forecast .day .day-name { color: rgba(255,255,255,0.55); }
+  .weather-widget.full .forecast .day .day-icon { font-size: 18px; line-height: 1; }
+  .weather-widget.full .forecast .day .day-temp { color: white; font-weight: 500; }
+
+  /* ===========================================================
+     System Audio widget */
+  .sys-audio-widget {
+    width: 100%; height: 100%;
+    color: white;
+    box-sizing: border-box;
+    display: flex;
+  }
+  .sys-audio-widget.compact {
+    flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px;
+    padding: 12px;
+  }
+  .sys-audio-widget.wide {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+  }
+  .sys-audio-widget.full {
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .sa-vol-circle {
+    width: 50px; height: 50px;
+    border-radius: 50%;
+    border: 4px solid rgba(255,255,255,0.15);
+    border-top-color: rgba(30, 215, 96, 0.85);
+    display: flex; align-items: center; justify-content: center;
+    color: white;
+    font-size: 20px;
+    flex: 0 0 auto;
+    position: relative;
+  }
+  .sa-vol-circle::after {
+    content: '🔊';
+    position: absolute;
+  }
+  .sa-mute-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+    color: white;
+    cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.04);
+    box-sizing: border-box;
+  }
+  .sa-mute-btn .icon { line-height: 1; }
+  .sa-mute-btn .label { font-size: 11px; color: rgba(255,255,255,0.7); margin-top: 4px; }
+  .sa-mute-btn.compact { width: 32px; height: 32px; border-radius: 6px; }
+  .sa-mute-btn.wide { width: 36px; height: 36px; border-radius: 8px; }
+  .sa-mute-btn.wide .icon { font-size: 20px; }
+  .sa-mute-btn.full { width: 56px; height: 56px; border-radius: 12px; }
+  .sa-mute-btn.full .icon { font-size: 28px; }
+
+  .sa-vol-slider-row {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%;
+  }
+  .sa-vol-slider-row .vol-icon { font-size: 18px; }
+  .sa-vol-slider-row .slider {
+    flex: 1 1 auto;
+    height: 24px;
+    background: rgba(255,255,255,0.12);
+    border-radius: 12px;
+    position: relative;
+    overflow: hidden;
+  }
+  .sa-vol-slider-row .slider::after {
+    content: '';
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 65%;
+    background: rgba(30, 215, 96, 0.85);
+    border-radius: 12px;
+  }
+  .sa-vol-slider-row .percent {
+    font-variant-numeric: tabular-nums;
+    color: rgba(255,255,255,0.85);
+    font-size: 13px;
+    min-width: 40px;
+    text-align: right;
+  }
+  .sa-vol-slider-row .vol-label {
+    font-size: 12px;
+    color: rgba(255,255,255,0.6);
+  }
+  .sa-buttons-row {
+    display: flex; gap: 8px;
+    align-items: center;
+  }
+  .sa-buttons-row.full { gap: 12px; justify-content: space-around; width: 100%; }
+  .sa-buttons-row.wide { gap: 6px; }
+  .sa-divider {
+    height: 1px; background: rgba(255,255,255,0.1); margin: 2px 0;
+  }
+  body.show-touch-surfaces .sa-mute-btn,
+  body.show-touch-surfaces .sa-vol-slider-row .slider {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+  }
+  body.show-touch-surfaces .sa-vol-circle {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+  }
+
+  /* ===========================================================
+     Home Assistant widget — masonry grid of variable-size entity cards. */
+  .ha-widget {
+    width: 100%; height: 100%;
+    padding: 12px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow: hidden;
+  }
+  .ha-group-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.65);
+    padding: 2px 4px 4px 4px;
+  }
+  .ha-grid {
+    display: grid;
+    gap: 8px;
+    grid-auto-rows: 70px;
+  }
+  .ha-entity {
+    border-radius: 8px;
+    padding: 8px;
+    box-sizing: border-box;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.05);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    color: white;
+    overflow: hidden;
+  }
+  .ha-entity.on { background: rgba(250, 204, 21, 0.18); border-color: rgba(250, 204, 21, 0.35); }
+  .ha-entity.off { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.65); }
+  .ha-entity .row {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .ha-entity .icon { font-size: 20px; line-height: 1; }
+  .ha-entity .name {
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ha-entity .state {
+    font-size: 13px;
+    color: rgba(255,255,255,0.85);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ha-entity .state.sub {
+    font-size: 11px;
+    font-family: inherit;
+    color: rgba(255,255,255,0.65);
+  }
+  body.show-touch-surfaces .ha-entity {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+  }
+
+  /* Common touch-surface coverage for the new widgets' buttons + sliders */
+  body.show-text-boundaries .clock-time,
+  body.show-text-boundaries .clock-date,
+  body.show-text-boundaries .weather-temp,
+  body.show-text-boundaries .weather-condition,
+  body.show-text-boundaries .weather-location,
+  body.show-text-boundaries .weather-widget .details .item,
+  body.show-text-boundaries .ha-entity .name,
+  body.show-text-boundaries .ha-entity .state {
+    outline: 1px dashed rgba(99, 191, 230, 0.85);
+    outline-offset: -1px;
+    background: rgba(99, 191, 230, 0.06);
+  }
+
   .spotify .progress { height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; overflow: hidden; margin: 4px 0; }
   .spotify .progress .filled { height: 100%; width: 35%; background: var(--accent); }
   .spotify .timeline { display: flex; justify-content: space-between; font-size: 11px; color: rgba(255,255,255,0.4); font-variant-numeric: tabular-nums; }
@@ -431,7 +714,15 @@
 <header>
   <h1>Ledge Widget Layout Sandbox</h1>
   <span style="color:var(--muted)">|</span>
-  <label>Widget: <select id="widget-type"><option value="spotify">Spotify</option></select></label>
+  <label>Widget:
+    <select id="widget-type">
+      <option value="spotify">Spotify</option>
+      <option value="clock">Clock</option>
+      <option value="weather">Weather</option>
+      <option value="systemAudio">System Audio</option>
+      <option value="homeAssistant">Home Assistant</option>
+    </select>
+  </label>
   <span style="color:var(--muted)">|</span>
   <span class="pill" id="tier-pill">—</span>
   <span style="color:var(--muted);font-size:12px;margin-left:auto">Resize via corner handle or sliders →</span>
@@ -503,9 +794,7 @@
 
     <section class="group">
       <h2>Config</h2>
-      <label class="check"><input type="checkbox" id="cfg-album-art" checked /> Show album art</label>
-      <label class="check"><input type="checkbox" id="cfg-progress" checked /> Show progress bar</label>
-      <label class="check"><input type="checkbox" id="cfg-skip" /> Show 10s skip buttons</label>
+      <div id="config-section"><!-- populated per widget --></div>
     </section>
 
     <section class="group">
@@ -516,13 +805,7 @@
 
     <section class="group">
       <h2>Computed</h2>
-      <dl class="info-grid">
-        <dt>Tier</dt><dd id="info-tier">—</dd>
-        <dt>artSize</dt><dd id="info-art">—</dd>
-        <dt>controlsWidth</dt><dd id="info-cw">—</dd>
-        <dt>cluster (skip<span id="info-skip-tag">OFF</span>)</dt><dd id="info-cluster">—</dd>
-        <dt>vol-tier thresholds</dt><dd id="info-thresholds" style="font-size:11px">—</dd>
-      </dl>
+      <dl class="info-grid" id="computed-section"><!-- populated per widget --></dl>
     </section>
 
     <section class="group">
@@ -533,10 +816,498 @@
 </main>
 
 <script>
-// ---------------------------------------------------------------------------
-// Mirror of the Swift layout logic in SpotifyWidget.swift.
-// Keep these constants in sync with the Swift file when you change either.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// SHARED HELPERS
+// ===========================================================================
+
+const XENEON = { w: 2560, h: 720, cols: 20, rows: 6, gap: 8, outerPad: 12 };
+function cellsToPt(cols, rows) {
+  const cellW = (XENEON.w - XENEON.outerPad * 2 - (XENEON.cols - 1) * XENEON.gap) / XENEON.cols;
+  const cellH = (XENEON.h - XENEON.outerPad * 2 - (XENEON.rows - 1) * XENEON.gap) / XENEON.rows;
+  return {
+    w: cellW * cols + (cols - 1) * XENEON.gap,
+    h: cellH * rows + (rows - 1) * XENEON.gap,
+  };
+}
+
+// Wires `data-cfg="key"` inputs in a container to a config object. Each input's
+// value is read on change and written back to cfg[key], then `onChange()` fires.
+function wireConfigInputs(container, cfg, onChange) {
+  container.querySelectorAll('[data-cfg]').forEach(input => {
+    const key = input.dataset.cfg;
+    const type = (input.type || '').toLowerCase();
+    if (type === 'checkbox') {
+      input.checked = !!cfg[key];
+      input.addEventListener('change', e => { cfg[key] = e.target.checked; onChange(); });
+    } else if (type === 'number' || type === 'range') {
+      input.value = cfg[key];
+      input.addEventListener('input', e => { cfg[key] = Number(e.target.value); onChange(); });
+    } else if (input.tagName === 'SELECT' || type === 'select-one') {
+      input.value = cfg[key];
+      input.addEventListener('change', e => { cfg[key] = e.target.value; onChange(); });
+    }
+  });
+}
+
+// ===========================================================================
+// SPOTIFY WIDGET MODULE (existing logic — see further down the script)
+// ===========================================================================
+//
+// The Spotify-specific compute/render/inspect functions are defined further
+// down (computeLayout, renderWidget, elementInspection). The module object
+// below wraps them so dispatch can be uniform across widgets.
+
+const SpotifyWidget = {
+  name: 'Spotify',
+  descriptor: { min: [6,2], default: [8,4], max: [12,6] },
+  defaultConfig: { skip: false, albumArt: true, progress: true },
+  configUI: `
+    <label class="check"><input type="checkbox" data-cfg="albumArt" /> Show album art</label>
+    <label class="check"><input type="checkbox" data-cfg="progress" /> Show progress bar</label>
+    <label class="check"><input type="checkbox" data-cfg="skip" /> Show 10s skip buttons</label>
+  `,
+  compute: (w, h, cfg) => computeLayout(w, h, cfg),
+  render:  (layout) => spotifyRenderToString(layout),
+  inspect: (layout) => elementInspection(layout),
+  info:    (layout) => {
+    const f = [];
+    f.push({ label: 'artSize', value: layout.artSize ? (layout.artFills ? `fills ${Math.round(layout.w)}×${Math.round(layout.h)}pt` : `${layout.artSize.toFixed(1)}pt`) : '—' });
+    f.push({ label: 'controlsWidth', value: layout.controlsWidth ? `${layout.controlsWidth.toFixed(1)}pt` : (layout.tier === 'overlay' ? `pill: ${layout.pillWidth}pt` : '—') });
+    f.push({ label: 'cluster', value: layout.clusterWidth ? `${layout.clusterWidth}pt (skip ${layout.cfg.skip ? 'ON' : 'OFF'})` : (layout.tier === 'overlay' ? `${layout.btnCount} btn${layout.btnCount > 1 ? 's' : ''}` : '—') });
+    if (layout.thresholds) {
+      const t = layout.thresholds;
+      f.push({ label: 'vol-tiers', value: Object.keys(t).map(k => `${k}:${Math.round(t[k])}`).join(' / ') });
+    }
+    return f;
+  },
+  subTier: (layout) => {
+    if (layout.tier === 'overlay') {
+      const m = layout.overlayMode === 'three' ? 'three-btn' : 'one-btn';
+      return layout.showTextOverlay ? `${m} + text` : m;
+    }
+    if (layout.tier === 'ultracompact') {
+      return layout.ucSubMode === 'art-overlay-play' ? 'art-overlay-play' : 'horizontal';
+    }
+    let s = layout.volTier || '';
+    if (layout.skipOverridden) s += ' · skip-off (no room)';
+    return s;
+  },
+};
+
+// Helper: re-render Spotify as an HTML string (the existing renderWidget()
+// writes directly to the DOM; we need a string-returning variant for module
+// uniformity).
+function spotifyRenderToString(layout) {
+  // Reuse the existing branch logic from renderWidget by temporarily
+  // capturing its output. Simpler: re-implement the dispatch inline using
+  // the existing per-tier functions which all return strings already.
+  if (layout.tier === 'overlay')      return renderOverlay(layout);
+  if (layout.tier === 'ultracompact') return renderUltraCompact(layout);
+  if (layout.tier === 'compact')      return renderCompact(layout);
+  return renderFull(layout);
+}
+
+// ===========================================================================
+// CLOCK WIDGET MODULE
+// ===========================================================================
+
+const ClockWidget = {
+  name: 'Clock',
+  descriptor: { min: [2,2], default: [4,4], max: [6,6] },
+  defaultConfig: { showDate: true, showSeconds: false },
+  configUI: `
+    <label class="check"><input type="checkbox" data-cfg="showDate" /> Show date</label>
+    <label class="check"><input type="checkbox" data-cfg="showSeconds" /> Show seconds (mockup)</label>
+  `,
+  compute(w, h, cfg) {
+    // Mirrors SwiftUI's .minimumScaleFactor(0.3) behaviour for the time text.
+    // Swift uses .system(size: 56). We compute an effective scaled size based
+    // on the widget area so the mockup matches what the real widget produces.
+    const targetTimeFont = 56;
+    const dateFont = cfg.showDate ? 16 : 0;
+    // Approximate width of "14:23" at the target font (5 chars × ~0.6 of font width)
+    const sampleStr = cfg.showSeconds ? '14:23:42' : '14:23';
+    const targetTextWidth = sampleStr.length * targetTimeFont * 0.55;
+    const usableW = w - 24, usableH = h - 24 - (cfg.showDate ? dateFont + 8 : 0);
+    const scaleW = usableW / targetTextWidth;
+    const scaleH = usableH / targetTimeFont;
+    const scale = Math.max(0.3, Math.min(1.0, Math.min(scaleW, scaleH)));
+    const timeFont = targetTimeFont * scale;
+    return { w, h, cfg, timeFont, dateFont, sampleStr };
+  },
+  render(layout) {
+    return `
+      <div class="clock-widget">
+        <div class="clock-time" style="font-size:${layout.timeFont}px">${layout.sampleStr}</div>
+        ${layout.cfg.showDate ? `<div class="clock-date" style="font-size:${layout.dateFont}px">Tuesday, May 20</div>` : ''}
+      </div>
+    `;
+  },
+  inspect(layout) {
+    return [
+      { name: 'Time', visible: true, dims: `${Math.round(layout.timeFont)}pt (target 56, scale ${(layout.timeFont/56).toFixed(2)})` },
+      { name: 'Date', visible: layout.cfg.showDate, dims: layout.cfg.showDate ? `${layout.dateFont}pt` : '—' },
+      { name: 'Seconds', visible: layout.cfg.showSeconds, dims: layout.cfg.showSeconds ? 'inline' : '—' },
+    ];
+  },
+  info(layout) {
+    return [
+      { label: 'Layout', value: 'fluid (no tier branching)' },
+      { label: 'Time font', value: `${Math.round(layout.timeFont)}pt (scaled from 56pt)` },
+      { label: 'Date font', value: layout.cfg.showDate ? `${layout.dateFont}pt` : 'hidden' },
+    ];
+  },
+  subTier: () => 'fluid',
+};
+
+// ===========================================================================
+// WEATHER WIDGET MODULE
+// ===========================================================================
+
+const WEATHER_SWIFT = {
+  // Thresholds from WeatherWidget.swift.
+  compactIfHeightBelow: 150,
+  forecastMinWidthPerDay: 50,   // each forecast day wants ≥ this much width
+};
+
+const WeatherWidget = {
+  name: 'Weather',
+  descriptor: { min: [3,2], default: [4,3], max: [4,3] },
+  defaultConfig: { forecastDays: 5, units: 'C' },
+  configUI: `
+    <label class="check">Forecast days
+      <input type="number" min="1" max="5" data-cfg="forecastDays" style="width:50px;margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px" />
+    </label>
+    <label class="check">Units
+      <select data-cfg="units" style="margin-left:auto;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px">
+        <option value="C">°C</option>
+        <option value="F">°F</option>
+      </select>
+    </label>
+  `,
+  compute(w, h, cfg) {
+    const tier = h < WEATHER_SWIFT.compactIfHeightBelow ? 'compact' : 'full';
+    // Forecast days are dynamic — capped by user pref AND by width per day.
+    const maxByWidth = Math.max(1, Math.floor((w - 32) / WEATHER_SWIFT.forecastMinWidthPerDay));
+    const forecastDays = Math.min(cfg.forecastDays, maxByWidth, 5);
+    return { w, h, cfg, tier, forecastDays };
+  },
+  render(layout) {
+    const tempUnit = layout.cfg.units;
+    const temp = tempUnit === 'C' ? '21°' : '70°';
+    if (layout.tier === 'compact') {
+      return `
+        <div class="weather-widget compact">
+          <div class="row">
+            <div class="weather-icon" style="font-size:36px">☀️</div>
+            <div class="text-stack">
+              <div class="weather-temp" style="font-size:32px">${temp}</div>
+              <div class="weather-condition" style="font-size:15px">Sunny</div>
+            </div>
+            <div class="weather-location location-right" style="font-size:13px">London</div>
+          </div>
+        </div>
+      `;
+    }
+    const days = ['Mon','Tue','Wed','Thu','Fri'].slice(0, layout.forecastDays);
+    const dayIcons = ['☀️','⛅','🌧','⛈','🌤'];
+    const dayTemps = ['22°','19°','17°','15°','20°'];
+    return `
+      <div class="weather-widget full">
+        <div class="hero">
+          <div class="weather-icon" style="font-size:52px">☀️</div>
+          <div class="text-stack">
+            <div class="weather-temp" style="font-size:48px">${temp}</div>
+            <div class="weather-condition" style="font-size:18px">Sunny</div>
+            <div class="weather-location" style="font-size:13px">London, UK</div>
+          </div>
+        </div>
+        <div class="details">
+          <div class="item"><span class="icon">🌡</span>Feels 19°</div>
+          <div class="item"><span class="icon">💧</span>52%</div>
+          <div class="item"><span class="icon">💨</span>12 km/h</div>
+        </div>
+        <div class="weather-divider"></div>
+        <div class="forecast">
+          ${days.map((d, i) => `
+            <div class="day">
+              <div class="day-name">${d}</div>
+              <div class="day-icon">${dayIcons[i]}</div>
+              <div class="day-temp">${dayTemps[i]}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  },
+  inspect(layout) {
+    const f = layout.tier === 'full';
+    const c = layout.tier === 'compact';
+    return [
+      { name: 'Weather Icon', visible: true, dims: c ? '36pt' : '52pt' },
+      { name: 'Temperature', visible: true, dims: c ? '32pt' : '48pt' },
+      { name: 'Condition', visible: true, dims: c ? '15pt' : '18pt' },
+      { name: 'Location', visible: true, dims: c ? '13pt (right)' : '13pt' },
+      { name: 'Details Row', visible: f, dims: f ? '13pt × 3 items' : '—' },
+      { name: 'Divider', visible: f, dims: f ? '1pt' : '—' },
+      { name: 'Forecast Days', visible: f && layout.forecastDays > 0, dims: f ? `${layout.forecastDays} day${layout.forecastDays > 1 ? 's' : ''}` : '—' },
+    ];
+  },
+  info(layout) {
+    return [
+      { label: 'Forecast days', value: `${layout.forecastDays} (cap: ${layout.cfg.forecastDays}, width: ${Math.floor((layout.w - 32) / 50)})` },
+      { label: 'Threshold', value: 'h ≥ 150pt → full' },
+    ];
+  },
+  subTier: (layout) => layout.tier === 'full' ? `${layout.forecastDays}-day` : 'condensed',
+};
+
+// ===========================================================================
+// SYSTEM AUDIO WIDGET MODULE
+// ===========================================================================
+
+const SystemAudioWidget = {
+  name: 'System Audio',
+  descriptor: { min: [2,2], default: [4,3], max: [6,4] },
+  defaultConfig: { muted: false, micMuted: false, cameraInUse: true },
+  configUI: `
+    <label class="check"><input type="checkbox" data-cfg="muted" /> Mute output</label>
+    <label class="check"><input type="checkbox" data-cfg="micMuted" /> Mute microphone</label>
+    <label class="check"><input type="checkbox" data-cfg="cameraInUse" /> Camera in use</label>
+  `,
+  compute(w, h, cfg) {
+    let tier;
+    if (w > 300 && h > 200) tier = 'full';
+    else if (w > 300)       tier = 'wide';
+    else                     tier = 'compact';
+    return { w, h, cfg, tier };
+  },
+  render(layout) {
+    const cfg = layout.cfg;
+    const volIcon = cfg.muted ? '🔇' : '🔊';
+    const micIcon = cfg.micMuted ? '🎙' : '🎤';
+    const camIcon = cfg.cameraInUse ? '📹' : '📷';
+
+    if (layout.tier === 'compact') {
+      return `
+        <div class="sys-audio-widget compact">
+          <div class="sa-vol-circle">${volIcon}</div>
+          <div class="sa-mute-btn compact"><span class="icon" style="font-size:14px">${micIcon}</span></div>
+        </div>
+      `;
+    }
+    if (layout.tier === 'wide') {
+      return `
+        <div class="sys-audio-widget wide">
+          <div class="sa-vol-slider-row" style="flex:1 1 auto">
+            <span class="vol-icon">${volIcon}</span>
+            <div class="slider"></div>
+            <span class="percent">65%</span>
+          </div>
+          <div class="sa-buttons-row wide">
+            <div class="sa-mute-btn wide"><span class="icon">${volIcon}</span></div>
+            <div class="sa-mute-btn wide"><span class="icon">${micIcon}</span></div>
+            <div class="sa-mute-btn wide"><span class="icon">${camIcon}</span></div>
+          </div>
+        </div>
+      `;
+    }
+    // full
+    return `
+      <div class="sys-audio-widget full">
+        <div class="sa-vol-slider-row">
+          <span class="vol-icon" style="font-size:18px">${volIcon}</span>
+          <div class="slider"></div>
+          <span class="percent">65%</span>
+        </div>
+        <div class="sa-divider"></div>
+        <div class="sa-buttons-row full">
+          <div class="sa-mute-btn full">
+            <span class="icon">${volIcon}</span>
+            <span class="label">${cfg.muted ? 'Muted' : 'Output'}</span>
+          </div>
+          <div class="sa-mute-btn full">
+            <span class="icon">${micIcon}</span>
+            <span class="label">${cfg.micMuted ? 'Mic off' : 'Mic'}</span>
+          </div>
+          <div class="sa-mute-btn full">
+            <span class="icon">${camIcon}</span>
+            <span class="label">${cfg.cameraInUse ? 'In use' : 'Idle'}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+  inspect(layout) {
+    const c = layout.tier === 'compact', wd = layout.tier === 'wide', f = layout.tier === 'full';
+    return [
+      { name: 'Volume Circle', visible: c, dims: c ? '50pt circle (4pt stroke)' : '—' },
+      { name: 'Volume Slider', visible: wd || f, dims: wd ? '24pt tall (inline)' : f ? '24pt tall' : '—' },
+      { name: 'Volume %', visible: wd || f, dims: wd || f ? '13pt' : '—' },
+      { name: 'Output Mute Btn', visible: wd || f, dims: wd ? '36×36pt' : f ? '56×56pt + label' : '—' },
+      { name: 'Mic Mute Btn', visible: true, dims: c ? '32×32pt' : wd ? '36×36pt' : '56×56pt + label' },
+      { name: 'Camera Status', visible: wd || f, dims: wd ? '36×36pt' : f ? '56×56pt + label' : '— (hidden)' },
+      { name: 'Divider', visible: f, dims: f ? '1pt' : '—' },
+    ];
+  },
+  info(layout) {
+    return [
+      { label: 'Tier rule', value: layout.tier === 'full' ? 'w>300 AND h>200' : layout.tier === 'wide' ? 'w>300 only' : 'else' },
+    ];
+  },
+  subTier: (layout) => layout.tier,
+};
+
+// ===========================================================================
+// HOME ASSISTANT WIDGET MODULE
+// ===========================================================================
+//
+// Implements the same custom-Layout masonry packing as the real widget.
+// Each entity has a user-configured cell span (1×1, 2×1, 1×2, 2×2). The
+// layout engine packs them row-major into a column count derived from the
+// container width: columns = floor((w - 24 + 8) / (100 + 8)).
+//
+// Demo entity list is fixed — the goal here is to verify the masonry
+// packing visually, not to test entity configuration UX.
+
+const HA_DEMO_ENTITIES = [
+  { id: 'light.living_room', name: 'Living Room',   icon: '💡', state: '78%',  on: true,  span: [2,1] },
+  { id: 'light.kitchen',     name: 'Kitchen',        icon: '💡', state: 'On',   on: true,  span: [1,1] },
+  { id: 'switch.fan',        name: 'Ceiling Fan',    icon: '🌀', state: 'Off',  on: false, span: [1,1] },
+  { id: 'sensor.temp',       name: 'Bedroom Temp',   icon: '🌡', state: '21°C', on: false, span: [1,2] },
+  { id: 'light.bedroom',     name: 'Bedroom',        icon: '💡', state: '45%',  on: true,  span: [2,2] },
+  { id: 'sensor.humidity',   name: 'Humidity',       icon: '💧', state: '52%',  on: false, span: [1,1] },
+  { id: 'switch.coffee',     name: 'Coffee',         icon: '☕', state: 'Off',  on: false, span: [1,1] },
+  { id: 'light.hallway',     name: 'Hallway',        icon: '💡', state: '100%', on: true,  span: [1,1] },
+  { id: 'sensor.power',      name: 'Power Now',      icon: '⚡', state: '1.4 kW', on: false, span: [2,1] },
+];
+
+const HA_SWIFT = {
+  cellMinimum: 100,
+  cellHeight: 70,
+  spacing: 8,
+  outerPad: 12,
+};
+
+const HomeAssistantWidget = {
+  name: 'Home Assistant',
+  descriptor: { min: [4,2], default: [6,3], max: [10,4] },
+  defaultConfig: { showGroupHeaders: true },
+  configUI: `
+    <label class="check"><input type="checkbox" data-cfg="showGroupHeaders" /> Show group headers</label>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.4">
+      Demo entities are fixed for layout testing.
+      Real widget uses per-entity cell-size config (1×1, 2×1, 1×2, 2×2).
+    </div>
+  `,
+  compute(w, h, cfg) {
+    const { cellMinimum, cellHeight, spacing, outerPad } = HA_SWIFT;
+    const innerW = w - outerPad * 2;
+    const columns = Math.max(1, Math.floor((innerW + spacing) / (cellMinimum + spacing)));
+    const cellW = (innerW - (columns - 1) * spacing) / columns;
+
+    // Row-major bin-packing.
+    const grid = [];
+    const placements = [];
+    function canPlace(col, row, cs, rs) {
+      for (let r = row; r < row + rs; r++) {
+        for (let c = col; c < col + cs; c++) {
+          if (grid[r] && grid[r][c]) return false;
+        }
+      }
+      return true;
+    }
+    function place(col, row, cs, rs) {
+      for (let r = row; r < row + rs; r++) {
+        if (!grid[r]) grid[r] = [];
+        for (let c = col; c < col + cs; c++) grid[r][c] = true;
+      }
+    }
+
+    for (const ent of HA_DEMO_ENTITIES) {
+      const cspan = Math.min(ent.span[0], columns);   // clamp to available width
+      const rspan = ent.span[1];
+      let placed = false;
+      for (let row = 0; row < 100 && !placed; row++) {
+        for (let col = 0; col + cspan <= columns; col++) {
+          if (canPlace(col, row, cspan, rspan)) {
+            place(col, row, cspan, rspan);
+            placements.push({ ...ent, col, row, cspan, rspan });
+            placed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    const rowsUsed = grid.length;
+    return { w, h, cfg, columns, rowsUsed, cellW, placements };
+  },
+  render(layout) {
+    const { cellW, placements, columns } = layout;
+    const { cellHeight, spacing } = HA_SWIFT;
+    const totalH = layout.rowsUsed * cellHeight + (layout.rowsUsed - 1) * spacing;
+    const items = placements.map(p => {
+      const w = p.cspan * cellW + (p.cspan - 1) * spacing;
+      const h = p.rspan * cellHeight + (p.rspan - 1) * spacing;
+      const x = p.col * (cellW + spacing);
+      const y = p.row * (cellHeight + spacing);
+      const cls = p.on ? 'on' : 'off';
+      return `
+        <div class="ha-entity ${cls}" style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px">
+          <div class="row">
+            <span class="icon">${p.icon}</span>
+            <span class="name">${p.name}</span>
+          </div>
+          <div class="state">${p.state}</div>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div class="ha-widget">
+        ${layout.cfg.showGroupHeaders ? '<div class="ha-group-header">Demo entities</div>' : ''}
+        <div class="ha-grid" style="position:relative;height:${totalH}px">
+          ${items}
+        </div>
+      </div>
+    `;
+  },
+  inspect(layout) {
+    return [
+      { name: `Grid (${layout.columns} cols × ${layout.rowsUsed} rows)`, visible: true, dims: `${Math.round(layout.cellW)}pt × 70pt cells` },
+      ...layout.placements.map(p => ({
+        name: p.name,
+        visible: true,
+        dims: `${p.cspan}×${p.rspan} @ col ${p.col}, row ${p.row}`,
+      })),
+    ];
+  },
+  info(layout) {
+    return [
+      { label: 'Columns', value: `${layout.columns} (cellMin: 100pt)` },
+      { label: 'Cell width', value: `${layout.cellW.toFixed(1)}pt` },
+      { label: 'Rows used', value: `${layout.rowsUsed}` },
+      { label: 'Entities placed', value: `${layout.placements.length} / ${HA_DEMO_ENTITIES.length}` },
+    ];
+  },
+  subTier: (layout) => `${layout.columns}-col`,
+};
+
+// ===========================================================================
+// WIDGET REGISTRY
+// ===========================================================================
+
+const WIDGETS = {
+  spotify:       SpotifyWidget,
+  clock:         ClockWidget,
+  weather:       WeatherWidget,
+  systemAudio:   SystemAudioWidget,
+  homeAssistant: HomeAssistantWidget,
+};
+
+// ===========================================================================
+// SPOTIFY-SPECIFIC LAYOUT LOGIC (existing — referenced by SpotifyWidget module)
+// ===========================================================================
 
 const SWIFT = {
   // nowPlayingView tier routing.
@@ -1095,36 +1866,72 @@ function renderInspector(layout) {
   pill.textContent = layout.tier + (subTier ? ' · ' + subTier : '');
 }
 
-// ---------------------------------------------------------------------------
-// State + wiring
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// STATE
+// ===========================================================================
 
-// State is now in cell units — widget point dimensions are always derived
-// from `cellsToPt` so we never end up with non-grid-aligned sizes.
 const state = {
+  widgetID: 'spotify',
   cols: 5,
   rows: 2,
-  cfg: { skip: false, albumArt: true, progress: true },
+  // Per-widget config — each widget gets its defaultConfig cloned in.
+  configs: Object.fromEntries(
+    Object.entries(WIDGETS).map(([id, w]) => [id, structuredClone(w.defaultConfig)])
+  ),
 };
 
-function refresh() {
-  const { w, h } = cellsToPt(state.cols, state.rows);
-  const layout = computeLayout(w, h, state.cfg);
-  renderWidget(layout);
-  renderInspector(layout);
+function currentWidget() { return WIDGETS[state.widgetID]; }
+function currentConfig() { return state.configs[state.widgetID]; }
 
-  // Sync cell inputs
+// ===========================================================================
+// DISPATCH
+// ===========================================================================
+
+function refresh() {
+  const widget = currentWidget();
+  const cfg = currentConfig();
+  const { w, h } = cellsToPt(state.cols, state.rows);
+  const layout = widget.compute(w, h, cfg);
+
+  // Render the widget body.
+  const widgetEl = document.getElementById('widget');
+  widgetEl.style.width = w + 'px';
+  widgetEl.style.height = h + 'px';
+  widgetEl.innerHTML = widget.render(layout);
+
+  // Tier pill + sub-tier.
+  const pill = document.getElementById('tier-pill');
+  const tierLabel = layout.tier || 'fluid';
+  const subTier = widget.subTier ? widget.subTier(layout) : null;
+  pill.className = 'pill tier-' + tierLabel;
+  pill.textContent = tierLabel + (subTier ? ' · ' + subTier : '');
+
+  // Computed panel — definition list pairs.
+  const computedEl = document.getElementById('computed-section');
+  const fields = widget.info ? widget.info(layout) : [];
+  computedEl.innerHTML = [
+    `<dt>Tier</dt><dd>${tierLabel}${subTier ? ' / ' + subTier : ''}</dd>`,
+    ...fields.map(f => `<dt>${f.label}</dt><dd>${f.value}</dd>`),
+  ].join('');
+
+  // Element list.
+  const listEl = document.getElementById('element-list');
+  const elements = widget.inspect ? widget.inspect(layout) : [];
+  listEl.innerHTML = elements.map(e => `
+    <div class="element ${e.visible ? '' : 'hidden'}">
+      <span class="check-mark">${e.visible ? '✓' : '✗'}</span>
+      <span class="name">${e.name}</span>
+      <span class="dims">${e.dims || ''}</span>
+    </div>
+  `).join('');
+
+  // Sync size inputs.
   document.getElementById('size-cols').value = state.cols;
   document.getElementById('size-rows').value = state.rows;
-
-  // Sync the preset dropdown: select the matching option if one exists,
-  // otherwise reset to the "Choose size…" placeholder.
   const preset = `${state.cols},${state.rows}`;
   const select = document.getElementById('snap-preset');
   const hasPreset = Array.from(select.options).some(o => o.value === preset);
   select.value = hasPreset ? preset : '';
-
-  // Point-dimension readout for reference (this is what computeLayout sees).
   document.getElementById('size-pt-readout').textContent = `${w.toFixed(1)} × ${h.toFixed(1)} pt`;
 
   // Position the corner drag handle at the widget's bottom-right.
@@ -1133,7 +1940,24 @@ function refresh() {
   handle.style.top = (h - 18) + 'px';
 }
 
-// Cell-count inputs — clamp to [1, XENEON.cols] × [1, XENEON.rows].
+// Switches the active widget — rebuilds the Config section UI from scratch,
+// rewires its inputs to the per-widget config object, and refreshes.
+function switchWidget(widgetID) {
+  if (!WIDGETS[widgetID]) return;
+  state.widgetID = widgetID;
+  const widget = currentWidget();
+  const configEl = document.getElementById('config-section');
+  configEl.innerHTML = widget.configUI;
+  wireConfigInputs(configEl, currentConfig(), refresh);
+  refresh();
+}
+
+// ===========================================================================
+// EVENT WIRE-UP
+// ===========================================================================
+
+document.getElementById('widget-type').addEventListener('change', e => switchWidget(e.target.value));
+
 document.getElementById('size-cols').addEventListener('input', e => {
   const v = parseInt(e.target.value, 10);
   if (!Number.isFinite(v)) return;
@@ -1147,29 +1971,6 @@ document.getElementById('size-rows').addEventListener('input', e => {
   refresh();
 });
 
-// Config toggles
-document.getElementById('cfg-album-art').addEventListener('change', e => { state.cfg.albumArt = e.target.checked; refresh(); });
-document.getElementById('cfg-progress').addEventListener('change', e => { state.cfg.progress = e.target.checked; refresh(); });
-document.getElementById('cfg-skip').addEventListener('change', e => { state.cfg.skip = e.target.checked; refresh(); });
-document.getElementById('cfg-touch-surfaces').addEventListener('change', e => {
-  document.body.classList.toggle('show-touch-surfaces', e.target.checked);
-});
-document.getElementById('cfg-text-boundaries').addEventListener('change', e => {
-  document.body.classList.toggle('show-text-boundaries', e.target.checked);
-});
-
-// Snap-to-cell — dropdown of preset cell sizes. Each option's `value` is
-// "cols,rows"; we compute the pt dimensions from the Xeneon Edge layout
-// math (20×6 grid on a 2560×720 display, 8pt gap, 12pt outer pad).
-const XENEON = { w: 2560, h: 720, cols: 20, rows: 6, gap: 8, outerPad: 12 };
-function cellsToPt(cols, rows) {
-  const cellW = (XENEON.w - XENEON.outerPad * 2 - (XENEON.cols - 1) * XENEON.gap) / XENEON.cols;
-  const cellH = (XENEON.h - XENEON.outerPad * 2 - (XENEON.rows - 1) * XENEON.gap) / XENEON.rows;
-  return {
-    w: cellW * cols + (cols - 1) * XENEON.gap,
-    h: cellH * rows + (rows - 1) * XENEON.gap,
-  };
-}
 document.getElementById('snap-preset').addEventListener('change', e => {
   const val = e.target.value;
   if (!val) return;
@@ -1179,9 +1980,14 @@ document.getElementById('snap-preset').addEventListener('change', e => {
   refresh();
 });
 
-// Corner drag handle — snaps to cell increments while dragging. Mirrors the
-// app's grid-aligned behaviour (no non-grid sizes). Uses a single-cell step
-// in pt so the snap threshold is "half a cell of mouse movement".
+document.getElementById('cfg-touch-surfaces').addEventListener('change', e => {
+  document.body.classList.toggle('show-touch-surfaces', e.target.checked);
+});
+document.getElementById('cfg-text-boundaries').addEventListener('change', e => {
+  document.body.classList.toggle('show-text-boundaries', e.target.checked);
+});
+
+// Corner drag handle — snaps to cell increments while dragging.
 (function setupResizeHandle() {
   const handle = document.getElementById('resize-handle');
   let startX, startY, startCols, startRows, stepW, stepH;
@@ -1192,7 +1998,6 @@ document.getElementById('snap-preset').addEventListener('change', e => {
     startY = e.clientY;
     startCols = state.cols;
     startRows = state.rows;
-    // pt distance covered by adding one more cell (cell size + one gap).
     const base = cellsToPt(1, 1);
     const next = cellsToPt(2, 2);
     stepW = next.w - base.w;
@@ -1218,7 +2023,8 @@ document.getElementById('snap-preset').addEventListener('change', e => {
   });
 })();
 
-refresh();
+// Initial bootstrap — populate config section for the default widget and render.
+switchWidget(state.widgetID);
 </script>
 </body>
 </html>
