@@ -183,11 +183,18 @@ struct SpotifyWidgetView: View {
                 albumArtBackground(size: geometry.size)
                     .opacity(backgroundOpacity)
 
-                // Tier routing branches on both dimensions: a short *or* narrow
-                // widget drops to the next-smaller tier. Height-only routing
-                // never fired the smaller tiers on the Xeneon Edge (720pt tall
-                // means even a 1-row widget exceeds the old 280pt threshold).
-                if h < 150 || w < 500 {
+                // Tier routing — mirrors Testing/widget-layout-sandbox/index.html.
+                // Overlay fires either by hard width cutoff (w < 300) OR when
+                // the compact tier's horizontal controls wouldn't fit (e.g. 3×2
+                // on Xeneon Edge, where the album art column eats so much space
+                // that even a 3-button cluster can't sit beside the track info).
+                let compactCWEstimate = w - 20 - (h - 20) - 12 - 8   // outerPad×2 - artSize - hSpacing - trailingInset
+                let overlayByWidth = w < 300
+                let overlayByControlsFit = compactCWEstimate < 184   // 3-button cluster minimum
+
+                if overlayByWidth || overlayByControlsFit {
+                    overlayLayout(size: geometry.size)
+                } else if h < 150 || w < 500 {
                     ultraCompactLayout(size: geometry.size)
                 } else if h < 280 || w < 800 {
                     compactLayout(size: geometry.size)
@@ -247,6 +254,123 @@ struct SpotifyWidgetView: View {
         }
     }
 
+    // MARK: - Overlay Layout (tiny widgets — 1×1, 2×2, 3×2, etc.)
+    //
+    // ┌─────────────────────┐    ┌──────────────────────────┐
+    // │   Track Name (txt)  │    │                          │
+    // │   Artist (overlay)  │    │                          │
+    // │                     │    │         ┌───┐            │
+    // │         ┌───┐       │    │         │ ▶ │            │
+    // │         │ ▶ │       │    │         └───┘            │
+    // │         └───┘       │    │                          │
+    // └─────────────────────┘    └──────────────────────────┘
+    //   3×2 with text overlay      1×1 — single-button overlay
+    //
+    // Album art fills the widget (aspect-fill, cropped); controls live in a
+    // translucent capsule centred over the art. Track name + artist appear in
+    // a top scrim only on widgets that are tall enough AND wide enough.
+
+    @ViewBuilder
+    private func overlayLayout(size: CGSize) -> some View {
+        let w = size.width
+        let h = size.height
+        let showThreeButtons = w >= 200
+        let showTextOverlay = w >= 300 && h >= 180
+
+        ZStack(alignment: .center) {
+            // Album art fills the widget surface (aspect-fill — may crop for
+            // non-square widgets). Drawn behind everything else.
+            if config.showAlbumArt, !displayedArtworkURL.isEmpty,
+               let url = URL(string: displayedArtworkURL) {
+                AsyncImage(url: url) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Rectangle().fill(.white.opacity(0.08))
+                }
+                .frame(width: w, height: h)
+                .clipped()
+                .opacity(artworkOpacity)
+            }
+
+            // Track name + artist scrim — only on bigger overlay widgets.
+            if showTextOverlay {
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        MarqueeText(
+                            text: state.trackName,
+                            font: .system(size: 16, weight: .semibold),
+                            color: .white,
+                            isContentVisible: textContentVisible
+                        )
+                        MarqueeText(
+                            text: state.artistName,
+                            font: .system(size: 13),
+                            color: .white.opacity(0.85),
+                            isContentVisible: textContentVisible
+                        )
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .black.opacity(0.75), location: 0.0),
+                                .init(color: .black.opacity(0.45), location: 0.6),
+                                .init(color: .black.opacity(0.0),  location: 1.0),
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    Spacer(minLength: 0)
+                }
+            }
+
+            // Controls capsule — centred. Three buttons if the widget can fit
+            // them (w ≥ 200), otherwise just play/pause.
+            HStack(spacing: 6) {
+                if showThreeButtons {
+                    Button { doPreviousTrack() } label: {
+                        Image(systemName: "backward.fill").font(.system(size: 20))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Circle())
+                            .debugTouchSurface()
+                    }
+                }
+                Button { doPlayPause() } label: {
+                    Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.white.opacity(0.12))
+                        .clipShape(Circle())
+                        .contentShape(Circle())
+                        .debugTouchSurface()
+                }
+                if showThreeButtons {
+                    Button { doNextTrack() } label: {
+                        Image(systemName: "forward.fill").font(.system(size: 20))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Circle())
+                            .debugTouchSurface()
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.55))
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+        }
+        .clipped()
+    }
+
     // MARK: - Ultra-Compact Layout (1 row)
     //
     // ┌──────────────────────────────────────────────────────────────┐
@@ -257,12 +381,33 @@ struct SpotifyWidgetView: View {
     @ViewBuilder
     private func ultraCompactLayout(size: CGSize) -> some View {
         let artSize = size.height - 16
+        // Sub-mode dispatch — mirrors widget-layout-sandbox computeLayout:
+        //   horizontal       — Art | Track/Artist/Album | prev/play/next cluster
+        //   art-overlay-play — Art (play overlaid) | Track/Artist/Album full-width
+        //
+        // The trigger is pure geometry: when the text column would have less
+        // than minTextRoom (100pt) sharing space with the 3-button cluster,
+        // drop the cluster and overlay play on the art slot instead. Whether
+        // album art is rendered does not affect the layout decision.
+        let ucPaddings: CGFloat = 16 + 20   // 8pt × 2 outer + 10pt × 2 HStack gaps
+        let cluster3: CGFloat = 184          // 3×48 + 2×20
+        let minTextRoom: CGFloat = 100
+        let textPlusClusterRoom = size.width - artSize - ucPaddings
+        let useArtOverlayPlay = textPlusClusterRoom < cluster3 + minTextRoom
 
+        if useArtOverlayPlay {
+            ultraCompactArtOverlay(artSize: artSize)
+        } else {
+            ultraCompactHorizontal(artSize: artSize)
+        }
+    }
+
+    /// Three text lines + a small album art on the left + horizontal prev/play/next cluster.
+    @ViewBuilder
+    private func ultraCompactHorizontal(artSize: CGFloat) -> some View {
         HStack(spacing: 10) {
-            // Small album art
             albumArtView(size: artSize, cornerRadius: 6, placeholderIconSize: 16)
 
-            // Track info — minimal
             VStack(alignment: .leading, spacing: 1) {
                 MarqueeText(
                     text: state.trackName,
@@ -273,7 +418,13 @@ struct SpotifyWidgetView: View {
                 MarqueeText(
                     text: state.artistName,
                     font: .system(size: 14),
-                    color: .white.opacity(0.6),
+                    color: .white.opacity(0.65),
+                    isContentVisible: textContentVisible
+                )
+                MarqueeText(
+                    text: state.albumName,
+                    font: .system(size: 12),
+                    color: .white.opacity(0.45),
                     isContentVisible: textContentVisible
                 )
                 if !deviceName.isEmpty {
@@ -284,7 +435,6 @@ struct SpotifyWidgetView: View {
 
             Spacer(minLength: 4)
 
-            // Just basic playback controls — no progress, no volume
             HStack(spacing: 20) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
@@ -308,6 +458,64 @@ struct SpotifyWidgetView: View {
             }
             .foregroundStyle(.white)
             .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+    }
+
+    /// Art-overlay-play sub-mode — play button centred on the album art slot,
+    /// no separate prev/next cluster, text column gets the full remaining width.
+    /// The play position is anchored to the art slot regardless of whether the
+    /// art itself is shown, so toggling album art does not reflow the controls.
+    @ViewBuilder
+    private func ultraCompactArtOverlay(artSize: CGFloat) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                if config.showAlbumArt {
+                    albumArtView(size: artSize, cornerRadius: 6, placeholderIconSize: 16)
+                } else {
+                    Color.clear.frame(width: artSize, height: artSize)
+                }
+
+                Button { doPlayPause() } label: {
+                    Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.black.opacity(0.55))
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.12), lineWidth: 1))
+                        .contentShape(Circle())
+                        .debugTouchSurface()
+                }
+                .buttonStyle(.plain)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                MarqueeText(
+                    text: state.trackName,
+                    font: .system(size: 18, weight: .semibold),
+                    color: .white,
+                    isContentVisible: textContentVisible
+                )
+                MarqueeText(
+                    text: state.artistName,
+                    font: .system(size: 14),
+                    color: .white.opacity(0.65),
+                    isContentVisible: textContentVisible
+                )
+                MarqueeText(
+                    text: state.albumName,
+                    font: .system(size: 12),
+                    color: .white.opacity(0.45),
+                    isContentVisible: textContentVisible
+                )
+                if !deviceName.isEmpty {
+                    deviceLabel(fontSize: 10)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
