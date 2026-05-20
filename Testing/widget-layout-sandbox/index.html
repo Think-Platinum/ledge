@@ -1,0 +1,1224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Ledge Widget Layout Sandbox</title>
+<style>
+  :root {
+    --bg: #18181b;
+    --panel: #232328;
+    --panel-2: #2a2a30;
+    --border: #3a3a42;
+    --text: #e4e4e7;
+    --muted: #9ca3af;
+    --accent: #1ed760;
+    --accent-dim: rgba(30, 215, 96, 0.35);
+    --warn: #fb923c;
+    --error: #ef4444;
+    --grid: rgba(255, 255, 255, 0.04);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; font-size: 13px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px 0; }
+
+  /* Layout */
+  body { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--panel);
+  }
+  header select, header button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  main { display: grid; grid-template-columns: 1fr 320px; overflow: hidden; }
+  .canvas-wrap {
+    overflow: auto;
+    padding: 32px;
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 20px 20px;
+    background-position: -1px -1px;
+    position: relative;
+  }
+  aside {
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    overflow: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Stage = the widget surface */
+  .stage-container { display: inline-block; position: relative; }
+  .stage-grid {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(120, 120, 130, 0.15) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120, 120, 130, 0.15) 1px, transparent 1px);
+  }
+  .widget {
+    position: relative;
+    background: #0f0f10;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06) inset;
+    color: white;
+    user-select: none;
+  }
+  .resize-handle {
+    position: absolute;
+    right: 4px; bottom: 4px;
+    width: 16px; height: 16px;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    cursor: nwse-resize;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px;
+    color: white;
+    z-index: 10;
+  }
+
+  /* Aside */
+  .group { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .row label { color: var(--muted); font-size: 12px; }
+  .row input[type=range] { flex: 1; min-width: 0; }
+  .row input[type=number] {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 2px 6px;
+    width: 60px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .check { display: flex; align-items: center; gap: 8px; }
+  .check input { accent-color: var(--accent); }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  .pill.tier-overlay { background: rgba(168,85,247,0.18); border-color: #a855f7; color: #c4b5fd; }
+  .pill.tier-ultracompact { background: rgba(251,146,60,0.15); border-color: var(--warn); color: var(--warn); }
+  .pill.tier-compact { background: rgba(30,215,96,0.15); border-color: var(--accent); color: var(--accent); }
+  .pill.tier-full { background: rgba(59,130,246,0.15); border-color: #3b82f6; color: #3b82f6; }
+
+  .info-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+  .info-grid dt { color: var(--muted); }
+  .info-grid dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  .element-list { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .element {
+    display: grid;
+    grid-template-columns: 16px 1fr auto;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    align-items: center;
+  }
+  .element.hidden { opacity: 0.45; }
+  .element .check-mark { color: var(--accent); }
+  .element.hidden .check-mark { color: var(--error); }
+  .element .name { font-weight: 500; }
+  .element .dims { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+
+  /* Widget rendering — Spotify-style */
+  .spotify { display: flex; height: 100%; }
+  .spotify .art {
+    flex: 0 0 auto;
+    background: linear-gradient(135deg, #8b1538, #6d1031);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.5);
+    font-weight: 700;
+    font-style: italic;
+  }
+  .spotify .content {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 4px;
+    justify-content: center;
+  }
+  .spotify .track-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spotify .artist {
+    color: rgba(255,255,255,0.65);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spotify .album {
+    color: rgba(255,255,255,0.4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Art-overlay-play sub-mode for narrow ultraCompact (e.g. 3×1):
+     album art on the left with a translucent play button overlaid centre,
+     no separate prev/next cluster — frees the rest of the width for
+     full-width track name + artist text. */
+  .spotify .art-container {
+    position: relative;
+    flex: 0 0 auto;
+  }
+  .spotify .art-play-overlay {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: white;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .spotify.ultra-compact.art-overlay-play .cluster { display: none; }
+  body.show-touch-surfaces .spotify .art-play-overlay {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+    background: rgba(255, 138, 76, 0.2);
+  }
+
+  .spotify .progress { height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; overflow: hidden; margin: 4px 0; }
+  .spotify .progress .filled { height: 100%; width: 35%; background: var(--accent); }
+  .spotify .timeline { display: flex; justify-content: space-between; font-size: 11px; color: rgba(255,255,255,0.4); font-variant-numeric: tabular-nums; }
+
+  .spotify .controls-row {
+    display: flex;
+    align-items: center;
+    margin-top: 4px;
+    position: relative;
+  }
+  .spotify .ghost {
+    flex: 0 0 auto;
+    visibility: hidden;
+  }
+  .spotify .cluster {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .spotify .btn {
+    width: 48px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    color: white;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 22px;
+    flex: 0 0 48px;
+    position: relative;
+  }
+  .spotify .btn.play { font-size: 30px; }
+
+  /* Touch-surface visualisation — shows the full 48×48 tap area as a
+     dashed orange outline so we can spot crowded controls and tune spacing. */
+  body.show-touch-surfaces .spotify .btn {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+    background: rgba(255, 138, 76, 0.08);
+  }
+  body.show-touch-surfaces .spotify .vol-slider,
+  body.show-touch-surfaces .spotify .vol-icon-only,
+  body.show-touch-surfaces .spotify .launch {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+    background: rgba(255, 138, 76, 0.08);
+  }
+  body.show-touch-surfaces .spotify .progress {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+  }
+
+  /* Text-element boundaries — dashed cyan outline around text containers
+     so we can spot text overflow and tune padding. Separate colour from
+     touch surfaces (orange) so both can be shown at once without confusion. */
+  body.show-text-boundaries .spotify .track-name,
+  body.show-text-boundaries .spotify .artist,
+  body.show-text-boundaries .spotify .album,
+  body.show-text-boundaries .spotify .timeline {
+    outline: 1px dashed rgba(99, 191, 230, 0.85);
+    outline-offset: -1px;
+    background: rgba(99, 191, 230, 0.06);
+  }
+  body.show-text-boundaries .spotify.overlay .text-overlay {
+    outline: 1px dashed rgba(99, 191, 230, 0.85);
+    outline-offset: -1px;
+  }
+  .spotify .vol-group {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+  }
+  .spotify .vol-icon {
+    width: 14px;
+    color: rgba(255,255,255,0.35);
+    text-align: center;
+    font-size: 11px;
+  }
+  .spotify .vol-icon-only {
+    width: 48px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    color: white;
+    font-size: 14px;
+  }
+  .spotify .vol-slider {
+    height: 4px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
+    position: relative;
+  }
+  .spotify .vol-slider::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 0;
+    width: 70%;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .spotify .vol-slider::before {
+    content: '';
+    position: absolute;
+    left: 70%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 10px; height: 10px;
+    background: white;
+    border-radius: 50%;
+  }
+  .spotify .launch {
+    width: 48px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,0.4);
+    font-size: 13px;
+  }
+
+  /* Ultra-compact override — hide progress, keep track name + artist + album.
+     All ×1 widgets in ultraCompact render the three text lines stacked vertically;
+     the album line is dropped only when the widget height is too short for it. */
+  .spotify.ultra-compact .progress, .spotify.ultra-compact .timeline { display: none; }
+  .spotify.ultra-compact .content { gap: 1px; justify-content: center; }
+  .spotify.ultra-compact .controls-row { margin-top: 2px; }
+
+  /* Overlay tier — album art fills widget, controls float on top in a translucent pill. */
+  .spotify.overlay {
+    position: relative;
+    width: 100%; height: 100%;
+    padding: 0;
+  }
+  .spotify.overlay .art {
+    position: absolute;
+    inset: 0;
+    width: 100%; height: 100%;
+    border-radius: 0;
+    /* Fill the whole widget — diagonal gradient suggests a cover image */
+    background: linear-gradient(135deg, #4b2065, #8b1538 50%, #1a1a2e);
+  }
+  .spotify.overlay .overlay-controls {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    gap: var(--overlay-gap, 6px);
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .spotify.overlay .overlay-controls .btn {
+    width: var(--overlay-btn, 44px);
+    height: var(--overlay-btn, 44px);
+    flex: 0 0 var(--overlay-btn, 44px);
+    color: white;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    font-size: var(--overlay-btn-font, 20px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    position: relative;
+  }
+  .spotify.overlay .overlay-controls .btn.play {
+    background: rgba(255, 255, 255, 0.12);
+    font-size: var(--overlay-play-font, 24px);
+  }
+  body.show-touch-surfaces .spotify.overlay .overlay-controls .btn {
+    outline: 1px dashed rgba(255, 138, 76, 0.85);
+    outline-offset: -1px;
+    background: rgba(255, 138, 76, 0.12);
+  }
+  body.show-touch-surfaces .spotify.overlay .overlay-controls .btn.play {
+    background: rgba(255, 138, 76, 0.2);
+  }
+
+  /* Text overlay (track name + artist) for medium overlay widgets (3x2+) */
+  .spotify.overlay .text-overlay {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    padding: 10px 14px 24px 14px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.45) 60%, rgba(0,0,0,0) 100%);
+    pointer-events: none;
+  }
+  .spotify.overlay .text-overlay .track-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: white;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spotify.overlay .text-overlay .artist {
+    font-size: 13px;
+    color: rgba(255,255,255,0.85);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ledge Widget Layout Sandbox</h1>
+  <span style="color:var(--muted)">|</span>
+  <label>Widget: <select id="widget-type"><option value="spotify">Spotify</option></select></label>
+  <span style="color:var(--muted)">|</span>
+  <span class="pill" id="tier-pill">—</span>
+  <span style="color:var(--muted);font-size:12px;margin-left:auto">Resize via corner handle or sliders →</span>
+</header>
+<main>
+  <div class="canvas-wrap">
+    <div class="stage-container" id="stage-container">
+      <div class="widget" id="widget"></div>
+      <div class="resize-handle" id="resize-handle">↘</div>
+    </div>
+  </div>
+  <aside>
+    <section class="group">
+      <h2>Size (cells)</h2>
+      <div class="row">
+        <label>Columns</label>
+        <input type="number" id="size-cols" min="1" max="20" step="1" value="5" />
+      </div>
+      <div class="row">
+        <label>Rows</label>
+        <input type="number" id="size-rows" min="1" max="6" step="1" value="2" />
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="font-size:11px">Preset (Xeneon Edge, 20×6)</label>
+        <select id="snap-preset" style="background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px;cursor:pointer;font-family:inherit">
+          <option value="" disabled selected>Choose size…</option>
+          <optgroup label="Single row (×1)">
+            <option value="1,1">1 × 1</option>
+            <option value="2,1">2 × 1</option>
+            <option value="3,1">3 × 1</option>
+            <option value="4,1">4 × 1</option>
+            <option value="5,1">5 × 1</option>
+            <option value="6,1">6 × 1</option>
+          </optgroup>
+          <optgroup label="Two rows (×2)">
+            <option value="1,2">1 × 2</option>
+            <option value="2,2">2 × 2</option>
+            <option value="3,2">3 × 2</option>
+            <option value="4,2">4 × 2</option>
+            <option value="5,2">5 × 2</option>
+            <option value="6,2">6 × 2 — Spotify min</option>
+          </optgroup>
+          <optgroup label="Three rows (×3)">
+            <option value="1,3">1 × 3</option>
+            <option value="2,3">2 × 3</option>
+            <option value="3,3">3 × 3</option>
+            <option value="4,3">4 × 3</option>
+            <option value="5,3">5 × 3</option>
+            <option value="6,3">6 × 3</option>
+          </optgroup>
+          <optgroup label="Larger (Spotify range)">
+            <option value="6,4">6 × 4</option>
+            <option value="6,6">6 × 6</option>
+            <option value="8,4">8 × 4 — default</option>
+            <option value="8,6">8 × 6</option>
+            <option value="10,3">10 × 3</option>
+            <option value="10,4">10 × 4</option>
+            <option value="10,6">10 × 6</option>
+            <option value="12,4">12 × 4</option>
+            <option value="12,6">12 × 6 — Spotify max</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="row" style="margin-top:4px">
+        <label style="font-size:11px;color:var(--muted)">Renders at</label>
+        <span id="size-pt-readout" style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">—</span>
+      </div>
+    </section>
+
+    <section class="group">
+      <h2>Config</h2>
+      <label class="check"><input type="checkbox" id="cfg-album-art" checked /> Show album art</label>
+      <label class="check"><input type="checkbox" id="cfg-progress" checked /> Show progress bar</label>
+      <label class="check"><input type="checkbox" id="cfg-skip" /> Show 10s skip buttons</label>
+    </section>
+
+    <section class="group">
+      <h2>Debug</h2>
+      <label class="check"><input type="checkbox" id="cfg-touch-surfaces" /> <span style="color:rgba(255,138,76,0.95)">▭</span> Show touch surfaces (48pt frames)</label>
+      <label class="check"><input type="checkbox" id="cfg-text-boundaries" /> <span style="color:rgba(99,191,230,0.95)">▭</span> Show text boundaries</label>
+    </section>
+
+    <section class="group">
+      <h2>Computed</h2>
+      <dl class="info-grid">
+        <dt>Tier</dt><dd id="info-tier">—</dd>
+        <dt>artSize</dt><dd id="info-art">—</dd>
+        <dt>controlsWidth</dt><dd id="info-cw">—</dd>
+        <dt>cluster (skip<span id="info-skip-tag">OFF</span>)</dt><dd id="info-cluster">—</dd>
+        <dt>vol-tier thresholds</dt><dd id="info-thresholds" style="font-size:11px">—</dd>
+      </dl>
+    </section>
+
+    <section class="group">
+      <h2>Elements</h2>
+      <div class="element-list" id="element-list"></div>
+    </section>
+  </aside>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// Mirror of the Swift layout logic in SpotifyWidget.swift.
+// Keep these constants in sync with the Swift file when you change either.
+// ---------------------------------------------------------------------------
+
+const SWIFT = {
+  // nowPlayingView tier routing.
+  // Routing order: overlay → ultracompact → compact → full.
+  // Overlay triggers either when the widget is too narrow OR when the
+  // compact layout's horizontal controls can't fit (e.g. 3×2 on Xeneon Edge).
+  overlayIfWidthBelow: 300,         // hard width cutoff
+  ultraCompactIfHeightBelow: 150,
+  ultraCompactIfWidthBelow: 500,
+  compactIfHeightBelow: 280,
+  compactIfWidthBelow: 800,
+
+  // OVERLAY tier — art fills the widget, controls float on top.
+  overlay: {
+    threeButtonMinWidth: 200,         // ≥ this → 3 buttons; below → just play/pause
+    textOverlayMinWidth: 300,         // ≥ this AND tall enough → show track-name overlay
+    textOverlayMinHeight: 180,
+    btn: 44,
+    btnFont: 20,
+    playFont: 24,
+    gap: 6,
+    pillHPad: 10,
+  },
+
+  // COMPACT tier (line ~327 in SpotifyWidget.swift).
+  compact: {
+    outerHPad: 10,
+    outerVPad: 10,
+    artVerticalInset: 20,     // artSize = h - 20
+    hStackSpacing: 12,
+    trailingInset: 8,         // .padding(.trailing, 8) on the controls row
+    cluster: {
+      buttonWidth: 48,
+      spacing: 20,
+    },
+    // Cluster widths derived from the constants above:
+    //   3-button cluster: 3×48 + 2×20 = 184pt   (skip-OFF, or skip-ON-overridden)
+    //   5-button cluster: 5×48 + 4×20 = 320pt   (skip-ON, if it fits)
+    cluster3Width: 184,
+    cluster5Width: 320,
+    vol: {
+      full: 117,    // icon(14) + 5 + slider(45) + 5 + launch(48)
+      slider: 64,   // icon(14) + 5 + slider(45)
+      icon: 48,     // icon-only popover trigger
+    },
+  },
+
+  // FULL tier (controlsWidth calc at SpotifyWidget.swift ~525).
+  full: {
+    outerHPad: 16,
+    outerVPad: 14,
+    artVerticalInset: 24,
+    artLeadingPad: 12,
+    hStackSpacing: 0,
+    trailingInset: 0,
+    cluster: {
+      buttonWidth: 48,
+      spacing: 24,
+    },
+    cluster3Width: 144,        // 3×48 + 2×24
+    cluster5Width: 336,        // 5×48 + 4×24
+    vol: {
+      full: 144,    // icon(14) + 6 + slider(70) + 6 + launch(48)
+      slider: 90,   // icon(14) + 6 + slider(70)
+      icon: 48,
+    },
+  },
+};
+
+// Helper: compute compact-tier controls width for a given (w, h).
+// Used both inside the compact path AND as a routing pre-check (if this is
+// too small for even 3 horizontal buttons, drop to overlay tier instead).
+function compactControlsWidth(w, h) {
+  const c = SWIFT.compact;
+  const artSize = h - c.artVerticalInset;
+  return w - (c.outerHPad * 2) - artSize - c.hStackSpacing - c.trailingInset;
+}
+
+// ---------------------------------------------------------------------------
+// Compute layout for a given (width, height, config)
+// Mirrors nowPlayingView → fullLayout/compactLayout/ultraCompactLayout dispatch
+// and the tier-degradation inside the controls row.
+// ---------------------------------------------------------------------------
+
+function computeLayout(w, h, cfg) {
+  // -- TIER ROUTING -----------------------------------------------------------
+  // Overlay triggers either by hard width cutoff OR by "compact horizontal
+  // controls don't fit" — the latter catches 3×2 on the Xeneon Edge where the
+  // widget is wide enough to be compact-tier on paper but the album art eats
+  // so much horizontal space that even a 3-button cluster won't fit.
+  let tier;
+  const cwIfCompact = compactControlsWidth(w, h);
+  const overlayByWidth = w < SWIFT.overlayIfWidthBelow;
+  const overlayByControlsFit = cwIfCompact < SWIFT.compact.cluster3Width;
+
+  if (overlayByWidth || overlayByControlsFit) {
+    tier = 'overlay';
+  } else if (h < SWIFT.ultraCompactIfHeightBelow || w < SWIFT.ultraCompactIfWidthBelow) {
+    tier = 'ultracompact';
+  } else if (h < SWIFT.compactIfHeightBelow || w < SWIFT.compactIfWidthBelow) {
+    tier = 'compact';
+  } else {
+    tier = 'full';
+  }
+
+  const layout = { tier, w, h };
+
+  if (tier === 'overlay') {
+    const o = SWIFT.overlay;
+    const threeBtnPillW = 3 * o.btn + 2 * o.gap + 2 * o.pillHPad;
+    const oneBtnPillW   = 1 * o.btn + 2 * o.pillHPad;
+    let overlayMode, pillWidth, btnCount;
+    if (w >= o.threeButtonMinWidth) {
+      overlayMode = 'three';
+      pillWidth = threeBtnPillW;
+      btnCount = 3;
+    } else {
+      overlayMode = 'one';
+      pillWidth = oneBtnPillW;
+      btnCount = 1;
+    }
+    // Show track-name overlay on bigger overlay widgets (e.g. 3×2 is 374×227,
+    // big enough to make track info worthwhile; 2×2 at 245×226 is too tight).
+    const showTextOverlay = w >= o.textOverlayMinWidth && h >= o.textOverlayMinHeight;
+
+    Object.assign(layout, {
+      overlayMode, pillWidth, btnCount, showTextOverlay,
+      cfg,
+      artSize: Math.min(w, h),
+      artFills: true,
+      reason: overlayByWidth ? 'width<300' : 'controls-fit',
+    });
+    return layout;
+  }
+
+  if (tier === 'compact') {
+    const c = SWIFT.compact;
+    const artSize = h - c.artVerticalInset;
+    const controlsWidth = cwIfCompact;
+
+    // -- SKIP-BUTTON OVERRIDE ------------------------------------------------
+    // If the user requested skip buttons but the 5-button cluster won't fit
+    // in the available controls width, force-drop skip — there's no room.
+    const cluster5Fits = c.cluster5Width <= controlsWidth;
+    const showsSkip = cfg.skip && cluster5Fits;
+    const skipOverridden = cfg.skip && !cluster5Fits;
+    const clusterWidth = showsSkip ? c.cluster5Width : c.cluster3Width;
+
+    // -- VOLUME-TIER STABILITY ----------------------------------------------
+    // Determine the volume tier using the LARGER cluster (5-button) when it
+    // fits, so toggling skip on/off doesn't shuffle the volume in and out.
+    // Falls back to the 3-button cluster only if skip-ON wouldn't fit anyway.
+    const clusterForTier = cluster5Fits ? c.cluster5Width : c.cluster3Width;
+
+    const cT1 = 2 * c.vol.full   + clusterForTier;
+    const cT2 = 2 * c.vol.slider + clusterForTier;
+    const cT3 = 2 * c.vol.icon   + clusterForTier;
+
+    let volTier, volGroupWidth;
+    if (controlsWidth >= cT1)       { volTier = 'cT1-full';   volGroupWidth = c.vol.full; }
+    else if (controlsWidth >= cT2)  { volTier = 'cT2-slider'; volGroupWidth = c.vol.slider; }
+    else if (controlsWidth >= cT3)  { volTier = 'cT3-icon';   volGroupWidth = c.vol.icon; }
+    else                            { volTier = 'cT4-noVol';  volGroupWidth = 0; }
+
+    Object.assign(layout, {
+      artSize, controlsWidth, clusterWidth, clusterForTier,
+      thresholds: { cT1, cT2, cT3 },
+      volTier, volGroupWidth,
+      cfg,
+      showsSkip, skipOverridden,
+    });
+  } else if (tier === 'full') {
+    const f = SWIFT.full;
+    const artSize = h - f.artVerticalInset;
+    const controlsWidth = w - artSize - f.artLeadingPad - (f.outerHPad * 2);
+
+    const cluster5Fits = f.cluster5Width <= controlsWidth;
+    const showsSkip = cfg.skip && cluster5Fits;
+    const skipOverridden = cfg.skip && !cluster5Fits;
+    const clusterWidth = showsSkip ? f.cluster5Width : f.cluster3Width;
+    const clusterForTier = cluster5Fits ? f.cluster5Width : f.cluster3Width;
+
+    const t1 = 2 * f.vol.full   + clusterForTier;
+    const t2 = 2 * f.vol.slider + clusterForTier;
+    const t3 = 2 * f.vol.icon   + clusterForTier;
+
+    let volTier, volGroupWidth;
+    if (controlsWidth >= t1)       { volTier = 't1-full';   volGroupWidth = f.vol.full; }
+    else if (controlsWidth >= t2)  { volTier = 't2-slider'; volGroupWidth = f.vol.slider; }
+    else if (controlsWidth >= t3)  { volTier = 't3-icon';   volGroupWidth = f.vol.icon; }
+    else                           { volTier = 't4-noVol';  volGroupWidth = 0; }
+
+    Object.assign(layout, {
+      artSize, controlsWidth, clusterWidth, clusterForTier,
+      thresholds: { t1, t2, t3 },
+      volTier, volGroupWidth,
+      cfg,
+      showsSkip, skipOverridden,
+    });
+  } else {
+    // ULTRACOMPACT tier — short-and-wide widgets. Two sub-modes:
+    //
+    //   horizontal      — Art | Track/Artist/Album text | prev/play/next cluster
+    //   art-overlay-play — Art (with play overlaid centred) | Track/Artist/Album text
+    //                      taking full remaining width, no separate cluster.
+    //
+    // art-overlay-play fires when the text column would be too cramped sharing
+    // space with the 3-button cluster (e.g. 3×1: leaves only ~60pt for text).
+    const artSize = h - 16;
+    const ucPaddings = 16 + 20;          // 8pt × 2 outer + 10pt × 2 HStack gaps
+    const cluster3 = 3 * 48 + 2 * 20;    // 184pt for prev/play/next
+    const minTextRoom = 100;              // text wants at least this in horizontal mode
+    const textPlusClusterRoom = w - artSize - ucPaddings;
+
+    // Sub-mode is a positioning decision driven purely by available room for
+    // text + horizontal cluster — independent of whether album art renders.
+    // When art is off, the play button still sits in the left-anchored slot
+    // where the art would have been; only the visual backdrop changes.
+    const useArtOverlayPlay = textPlusClusterRoom < cluster3 + minTextRoom;
+    const ucSubMode = useArtOverlayPlay ? 'art-overlay-play' : 'horizontal';
+
+    Object.assign(layout, { artSize, ucSubMode, cfg });
+  }
+
+  return layout;
+}
+
+// ---------------------------------------------------------------------------
+// Render the widget at the computed layout.
+// ---------------------------------------------------------------------------
+
+function renderWidget(layout) {
+  const widget = document.getElementById('widget');
+  widget.style.width = layout.w + 'px';
+  widget.style.height = layout.h + 'px';
+  widget.className = 'widget';
+
+  if (layout.tier === 'overlay') {
+    widget.innerHTML = renderOverlay(layout);
+  } else if (layout.tier === 'ultracompact') {
+    widget.innerHTML = renderUltraCompact(layout);
+    widget.querySelector('.spotify').classList.add('ultra-compact');
+  } else if (layout.tier === 'compact') {
+    widget.innerHTML = renderCompact(layout);
+  } else {
+    widget.innerHTML = renderFull(layout);
+  }
+}
+
+function renderOverlay(layout) {
+  const o = SWIFT.overlay;
+  const artBlock = layout.cfg.albumArt
+    ? `<div class="art"></div>`
+    : '';
+
+  const playBtn = `<button class="btn play" data-label="play">▶</button>`;
+  const prevBtn = `<button class="btn" data-label="prev">⏮</button>`;
+  const nextBtn = `<button class="btn" data-label="next">⏭</button>`;
+
+  const buttons = layout.overlayMode === 'three'
+    ? `${prevBtn}${playBtn}${nextBtn}`
+    : `${playBtn}`;
+
+  // Pill style variables come from the SWIFT.overlay constants so the visual
+  // matches the threshold math exactly.
+  const styleVars = `
+    --overlay-btn:${o.btn}px;
+    --overlay-btn-font:${o.btnFont}px;
+    --overlay-play-font:${o.playFont}px;
+    --overlay-gap:${o.gap}px;
+  `;
+
+  const textOverlay = layout.showTextOverlay
+    ? `<div class="text-overlay">
+         <div class="track-name">Simple Man</div>
+         <div class="artist">Shinedown</div>
+       </div>`
+    : '';
+
+  return `
+    <div class="spotify overlay" style="${styleVars}">
+      ${artBlock}
+      ${textOverlay}
+      <div class="overlay-controls">${buttons}</div>
+    </div>
+  `;
+}
+
+function renderArt(layout, fontPx) {
+  if (!layout.cfg.albumArt) {
+    return '';
+  }
+  const s = layout.artSize;
+  return `<div class="art" style="width:${s}px;height:${s}px;font-size:${fontPx}px">Art</div>`;
+}
+
+function renderCluster(layout, opts) {
+  // Use the layout's resolved skip state (post-override), not the raw config —
+  // so when skip-ON is requested but the cluster wouldn't fit, the cluster
+  // renders as 3 buttons without an attempt to draw the skip glyphs.
+  const skip = layout.showsSkip;
+  const spacing = opts.spacing;
+  const btn = (sym, label, klass = '') => {
+    const fs = klass === 'play' ? (opts.playSize || opts.btnSize) : opts.btnSize;
+    return `<button class="btn ${klass}" data-label="${label}" style="font-size:${fs || 22}px">${sym}</button>`;
+  };
+
+  const items = [];
+  items.push(btn('⏮', 'prev'));
+  if (skip) items.push(btn('⟲10', 'back10'));
+  items.push(btn('▶', 'play', 'play'));
+  if (skip) items.push(btn('10⟳', 'fwd10'));
+  items.push(btn('⏭', 'next'));
+
+  return `<div class="cluster" style="gap:${spacing}px">${items.join('')}</div>`;
+}
+
+function renderVolGroup(layout, opts) {
+  const t = layout.volTier;
+  if (!t || t.endsWith('noVol')) return '';
+
+  const w = layout.volGroupWidth;
+  if (t.startsWith('cT1') || t.startsWith('t1')) {
+    return `<div class="vol-group" style="width:${w}px">
+      <span class="vol-icon">🔊</span>
+      <div class="vol-slider" style="width:${opts.sliderW}px"></div>
+      <div class="launch">↗</div>
+    </div>`;
+  }
+  if (t.startsWith('cT2') || t.startsWith('t2')) {
+    return `<div class="vol-group" style="width:${w}px">
+      <span class="vol-icon">🔊</span>
+      <div class="vol-slider" style="width:${opts.sliderW}px"></div>
+    </div>`;
+  }
+  if (t.startsWith('cT3') || t.startsWith('t3')) {
+    return `<div class="vol-group" style="width:${w}px">
+      <div class="vol-icon-only">🔊</div>
+    </div>`;
+  }
+  return '';
+}
+
+function renderControlsRow(layout, opts) {
+  const ghostW = layout.volGroupWidth;
+  const ghost = ghostW > 0 ? `<div class="ghost" style="width:${ghostW}px"></div>` : '';
+  const cluster = renderCluster(layout, opts);
+  const vol = renderVolGroup(layout, opts);
+  return `<div class="controls-row">${ghost}${cluster}${vol}</div>`;
+}
+
+function renderCompact(layout) {
+  const c = SWIFT.compact;
+  return `
+    <div class="spotify" style="padding:${c.outerVPad}px ${c.outerHPad}px;gap:${c.hStackSpacing}px">
+      ${renderArt(layout, 18)}
+      <div class="content">
+        <div class="track-name" style="font-size:22px">Simple Man</div>
+        <div class="artist" style="font-size:16px">Shinedown</div>
+        <div class="album" style="font-size:14px">Simple Man</div>
+        ${layout.cfg.progress ? `
+          <div class="progress"><div class="filled"></div></div>
+          <div class="timeline"><span>4:00</span><span>4:28</span></div>
+        ` : ''}
+        <div style="padding-right:${c.trailingInset}px">
+          ${renderControlsRow(layout, { spacing: c.cluster.spacing, btnSize: 22, playSize: 30, sliderW: 45 })}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderFull(layout) {
+  const f = SWIFT.full;
+  return `
+    <div class="spotify" style="padding:${f.outerVPad}px ${f.outerHPad}px;gap:${f.hStackSpacing}px">
+      ${layout.cfg.albumArt ? `<div style="padding-left:${f.artLeadingPad}px;padding-top:0;padding-bottom:0">${renderArt(layout, 24)}</div>` : ''}
+      <div class="content" style="padding:0 ${f.outerHPad}px">
+        <div class="track-name" style="font-size:28px">Simple Man</div>
+        <div class="artist" style="font-size:20px">Shinedown</div>
+        <div class="album" style="font-size:16px">Simple Man</div>
+        ${layout.cfg.progress ? `
+          <div class="progress" style="height:8px"><div class="filled"></div></div>
+          <div class="timeline" style="font-size:12px"><span>4:00</span><span>4:28</span></div>
+        ` : ''}
+        ${renderControlsRow(layout, { spacing: f.cluster.spacing, btnSize: 26, playSize: 36, sliderW: 70 })}
+      </div>
+    </div>
+  `;
+}
+
+function renderUltraCompact(layout) {
+  // Three text lines stacked: track name, artist, album. The .content flex
+  // container is min-width:0 so each line ellipsis-truncates independently.
+  const textBlock = `
+    <div class="content">
+      <div class="track-name" style="font-size:18px">Simple Man</div>
+      <div class="artist" style="font-size:14px">Shinedown</div>
+      <div class="album" style="font-size:12px">Simple Man</div>
+    </div>
+  `;
+
+  if (layout.ucSubMode === 'art-overlay-play') {
+    // Play button sits in the left-anchored slot. If art is on it's overlaid
+    // on the art; if art is off the slot becomes an empty placeholder of the
+    // same dimensions so the play position stays consistent.
+    const artInner = layout.cfg.albumArt
+      ? renderArt(layout, 14)
+      : `<div class="art-placeholder" style="width:${layout.artSize}px;height:${layout.artSize}px"></div>`;
+    return `
+      <div class="spotify ultra-compact art-overlay-play" style="padding:8px;gap:10px">
+        <div class="art-container">
+          ${artInner}
+          <button class="art-play-overlay" data-label="play">▶</button>
+        </div>
+        ${textBlock}
+      </div>
+    `;
+  }
+
+  // Default horizontal mode: art | text | prev/play/next cluster.
+  return `
+    <div class="spotify ultra-compact" style="padding:8px;gap:10px">
+      ${renderArt(layout, 14)}
+      ${textBlock}
+      <div class="cluster" style="gap:20px;margin-left:auto;margin-right:0">
+        <button class="btn" data-label="prev">⏮</button>
+        <button class="btn play" data-label="play">▶</button>
+        <button class="btn" data-label="next">⏭</button>
+      </div>
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Element inspector — derive a list of visible/hidden elements + their dims
+// from the computed layout (post-tier decisions).
+// ---------------------------------------------------------------------------
+
+function elementInspection(layout) {
+  const elements = [];
+  const add = (name, visible, dims = '') => elements.push({ name, visible, dims });
+
+  const isO  = layout.tier === 'overlay';
+  const isUC = layout.tier === 'ultracompact';
+  const isC  = layout.tier === 'compact';
+  const isF  = layout.tier === 'full';
+
+  // Album art
+  if (isO) {
+    add('Album Art (fills widget)', layout.cfg.albumArt,
+        layout.cfg.albumArt ? `${Math.round(layout.w)}×${Math.round(layout.h)}pt` : '—');
+  } else {
+    add('Album Art', layout.cfg.albumArt,
+        layout.cfg.albumArt ? `${Math.round(layout.artSize)}×${Math.round(layout.artSize)}pt` : '—');
+  }
+
+  // Text rows — overlay tier may show track/artist as a top-of-widget overlay
+  const overlayHasText = isO && layout.showTextOverlay;
+  add('Track Name',  overlayHasText || (!isO),
+      overlayHasText ? '16pt (overlay)' : (isO ? '—' : (isUC ? '18pt' : isC ? '22pt' : '28pt')));
+  add('Artist',      overlayHasText || !isO,
+      overlayHasText ? '13pt (overlay)' : (isO ? '—' : (isUC ? '14pt' : isC ? '16pt' : '20pt')));
+  add('Album',       !isO,
+      isO ? '—' : (isUC ? '12pt' : isC ? '14pt' : '16pt'));
+  add('Progress Bar', layout.cfg.progress && !isO && !isUC,
+      (layout.cfg.progress && !isO && !isUC) ? (isC ? '6pt tall' : '8pt tall') : '—');
+
+  // Playback buttons
+  if (isO) {
+    const showAll3 = layout.overlayMode === 'three';
+    const btnSize = `${SWIFT.overlay.btn}×${SWIFT.overlay.btn}pt`;
+    add('Prev Button',  showAll3, showAll3 ? btnSize : '—');
+    add('Back 10s',     false, layout.cfg.skip ? '— (no room)' : '—');
+    add('Play/Pause',   true, btnSize);
+    add('Forward 10s',  false, layout.cfg.skip ? '— (no room)' : '—');
+    add('Next Button',  showAll3, showAll3 ? btnSize : '—');
+  } else if (isUC && layout.ucSubMode === 'art-overlay-play') {
+    // Art-overlay sub-mode: only play/pause (overlaid on art), no prev/next.
+    add('Prev Button',  false, '— (no room)');
+    add('Back 10s',     false, layout.cfg.skip ? '— (no room)' : '—');
+    add('Play/Pause',   true,  '44×44pt (overlay)');
+    add('Forward 10s',  false, layout.cfg.skip ? '— (no room)' : '—');
+    add('Next Button',  false, '— (no room)');
+  } else {
+    const showsSkip = !!layout.showsSkip;
+    const skipNote = layout.skipOverridden ? '— (no room)' : '—';
+    add('Prev Button', true, '48×48pt');
+    add('Back 10s',    showsSkip, showsSkip ? '48×48pt' : skipNote);
+    add('Play/Pause',  true, '48×48pt');
+    add('Forward 10s', showsSkip, showsSkip ? '48×48pt' : skipNote);
+    add('Next Button', true, '48×48pt');
+  }
+
+  // Volume group — never shown in overlay or ultracompact
+  if (isO || isUC) {
+    add('Volume Icon', false, '—');
+    add('Volume Slider', false, '—');
+    add('Launch Button', false, '—');
+  } else {
+    const t = layout.volTier || '';
+    add('Volume Icon',     !t.endsWith('noVol'),  t.endsWith('noVol') ? '—' : (t.includes('icon') ? '48×48pt' : '14pt'));
+    add('Volume Slider',   t.includes('full') || t.includes('slider') || t.includes('icon'),
+        t.includes('icon') ? 'popover' : (t.includes('slider') || t.includes('full') ? (isC ? '45pt' : '70pt') : '—'));
+    add('Launch Button',   t.includes('full'), t.includes('full') ? '48×48pt' : '—');
+  }
+
+  return elements;
+}
+
+function renderInspector(layout) {
+  const list = document.getElementById('element-list');
+  const elements = elementInspection(layout);
+  list.innerHTML = elements.map(e => `
+    <div class="element ${e.visible ? '' : 'hidden'}">
+      <span class="check-mark">${e.visible ? '✓' : '✗'}</span>
+      <span class="name">${e.name}</span>
+      <span class="dims">${e.dims}</span>
+    </div>
+  `).join('');
+
+  let subTier;
+  if (layout.tier === 'overlay') {
+    const mode = layout.overlayMode === 'three' ? 'three-btn' : 'one-btn';
+    subTier = layout.showTextOverlay ? `${mode} + text` : mode;
+  } else if (layout.tier === 'ultracompact') {
+    subTier = layout.ucSubMode === 'art-overlay-play' ? 'art-overlay-play' : 'horizontal';
+  } else {
+    subTier = layout.volTier;
+    if (layout.skipOverridden) subTier += ' · skip-off (no room)';
+  }
+
+  document.getElementById('info-tier').textContent = `${layout.tier}${subTier ? ' / ' + subTier : ''}`;
+  document.getElementById('info-art').textContent = layout.artSize
+    ? (layout.artFills ? `fills ${Math.round(layout.w)}×${Math.round(layout.h)}pt` : `${layout.artSize.toFixed(1)}pt`)
+    : '—';
+  document.getElementById('info-cw').textContent = layout.controlsWidth
+    ? `${layout.controlsWidth.toFixed(1)}pt`
+    : (layout.tier === 'overlay' ? `pill: ${layout.pillWidth}pt` : '—');
+  document.getElementById('info-cluster').textContent = layout.clusterWidth
+    ? `${layout.clusterWidth}pt`
+    : (layout.tier === 'overlay' ? `${layout.btnCount} btn${layout.btnCount > 1 ? 's' : ''}` : '—');
+  document.getElementById('info-skip-tag').textContent = layout.cfg && layout.cfg.skip ? 'ON' : 'OFF';
+  if (layout.thresholds) {
+    const t = layout.thresholds;
+    const keys = Object.keys(t);
+    document.getElementById('info-thresholds').textContent = keys.map(k => `${k}:${Math.round(t[k])}`).join(' / ');
+  } else if (layout.tier === 'overlay') {
+    document.getElementById('info-thresholds').textContent = `three-btn≥${SWIFT.overlay.threeButtonMinWidth}pt`;
+  } else {
+    document.getElementById('info-thresholds').textContent = '—';
+  }
+
+  const pill = document.getElementById('tier-pill');
+  pill.className = 'pill tier-' + layout.tier;
+  pill.textContent = layout.tier + (subTier ? ' · ' + subTier : '');
+}
+
+// ---------------------------------------------------------------------------
+// State + wiring
+// ---------------------------------------------------------------------------
+
+// State is now in cell units — widget point dimensions are always derived
+// from `cellsToPt` so we never end up with non-grid-aligned sizes.
+const state = {
+  cols: 5,
+  rows: 2,
+  cfg: { skip: false, albumArt: true, progress: true },
+};
+
+function refresh() {
+  const { w, h } = cellsToPt(state.cols, state.rows);
+  const layout = computeLayout(w, h, state.cfg);
+  renderWidget(layout);
+  renderInspector(layout);
+
+  // Sync cell inputs
+  document.getElementById('size-cols').value = state.cols;
+  document.getElementById('size-rows').value = state.rows;
+
+  // Sync the preset dropdown: select the matching option if one exists,
+  // otherwise reset to the "Choose size…" placeholder.
+  const preset = `${state.cols},${state.rows}`;
+  const select = document.getElementById('snap-preset');
+  const hasPreset = Array.from(select.options).some(o => o.value === preset);
+  select.value = hasPreset ? preset : '';
+
+  // Point-dimension readout for reference (this is what computeLayout sees).
+  document.getElementById('size-pt-readout').textContent = `${w.toFixed(1)} × ${h.toFixed(1)} pt`;
+
+  // Position the corner drag handle at the widget's bottom-right.
+  const handle = document.getElementById('resize-handle');
+  handle.style.left = (w - 18) + 'px';
+  handle.style.top = (h - 18) + 'px';
+}
+
+// Cell-count inputs — clamp to [1, XENEON.cols] × [1, XENEON.rows].
+document.getElementById('size-cols').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  if (!Number.isFinite(v)) return;
+  state.cols = Math.max(1, Math.min(XENEON.cols, v));
+  refresh();
+});
+document.getElementById('size-rows').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  if (!Number.isFinite(v)) return;
+  state.rows = Math.max(1, Math.min(XENEON.rows, v));
+  refresh();
+});
+
+// Config toggles
+document.getElementById('cfg-album-art').addEventListener('change', e => { state.cfg.albumArt = e.target.checked; refresh(); });
+document.getElementById('cfg-progress').addEventListener('change', e => { state.cfg.progress = e.target.checked; refresh(); });
+document.getElementById('cfg-skip').addEventListener('change', e => { state.cfg.skip = e.target.checked; refresh(); });
+document.getElementById('cfg-touch-surfaces').addEventListener('change', e => {
+  document.body.classList.toggle('show-touch-surfaces', e.target.checked);
+});
+document.getElementById('cfg-text-boundaries').addEventListener('change', e => {
+  document.body.classList.toggle('show-text-boundaries', e.target.checked);
+});
+
+// Snap-to-cell — dropdown of preset cell sizes. Each option's `value` is
+// "cols,rows"; we compute the pt dimensions from the Xeneon Edge layout
+// math (20×6 grid on a 2560×720 display, 8pt gap, 12pt outer pad).
+const XENEON = { w: 2560, h: 720, cols: 20, rows: 6, gap: 8, outerPad: 12 };
+function cellsToPt(cols, rows) {
+  const cellW = (XENEON.w - XENEON.outerPad * 2 - (XENEON.cols - 1) * XENEON.gap) / XENEON.cols;
+  const cellH = (XENEON.h - XENEON.outerPad * 2 - (XENEON.rows - 1) * XENEON.gap) / XENEON.rows;
+  return {
+    w: cellW * cols + (cols - 1) * XENEON.gap,
+    h: cellH * rows + (rows - 1) * XENEON.gap,
+  };
+}
+document.getElementById('snap-preset').addEventListener('change', e => {
+  const val = e.target.value;
+  if (!val) return;
+  const [cols, rows] = val.split(',').map(Number);
+  state.cols = cols;
+  state.rows = rows;
+  refresh();
+});
+
+// Corner drag handle — snaps to cell increments while dragging. Mirrors the
+// app's grid-aligned behaviour (no non-grid sizes). Uses a single-cell step
+// in pt so the snap threshold is "half a cell of mouse movement".
+(function setupResizeHandle() {
+  const handle = document.getElementById('resize-handle');
+  let startX, startY, startCols, startRows, stepW, stepH;
+
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    startX = e.clientX;
+    startY = e.clientY;
+    startCols = state.cols;
+    startRows = state.rows;
+    // pt distance covered by adding one more cell (cell size + one gap).
+    const base = cellsToPt(1, 1);
+    const next = cellsToPt(2, 2);
+    stepW = next.w - base.w;
+    stepH = next.h - base.h;
+
+    const move = ev => {
+      const dCols = Math.round((ev.clientX - startX) / stepW);
+      const dRows = Math.round((ev.clientY - startY) / stepH);
+      const newCols = Math.max(1, Math.min(XENEON.cols, startCols + dCols));
+      const newRows = Math.max(1, Math.min(XENEON.rows, startRows + dRows));
+      if (newCols !== state.cols || newRows !== state.rows) {
+        state.cols = newCols;
+        state.rows = newRows;
+        refresh();
+      }
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+})();
+
+refresh();
+</script>
+</body>
+</html>
