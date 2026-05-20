@@ -945,14 +945,16 @@ struct InteractiveGridEditor: View {
     let layoutManager: LayoutManager
     @Binding var selectedWidgetID: UUID?
 
-    /// During a drag, tracks the snapped grid position (col, row) the widget is hovering over.
-    @State private var dragSnappedCol: Int?
-    @State private var dragSnappedRow: Int?
+    /// During a move drag, tracks the raw pixel offset from the widget's original position.
+    /// The widget renders at its stored grid position PLUS this offset, giving smooth mouse-tracking.
+    /// On release, the offset is snapped to the nearest grid cell and committed to the model.
+    @State private var dragOffset: CGSize = .zero
     @State private var draggingWidgetID: UUID?
 
-    /// During a resize, tracks the snapped span.
-    @State private var resizeSnappedCols: Int?
-    @State private var resizeSnappedRows: Int?
+    /// During a resize drag, tracks the raw pixel delta from the widget's original size.
+    /// The widget renders its stored span PLUS this delta in pixels, giving smooth mouse-tracking.
+    /// On release, the delta is snapped to the nearest cell-aligned span and committed to the model.
+    @State private var resizeDelta: CGSize = .zero
     @State private var resizingWidgetID: UUID?
 
     private let widgetColors: [Color] = [
@@ -985,19 +987,26 @@ struct InteractiveGridEditor: View {
                     let isSelected = placement.id == selectedWidgetID
                     let isDragging = placement.id == draggingWidgetID
                     let isResizing = placement.id == resizingWidgetID
+                    let isActive = isDragging || isResizing
                     let descriptor = WidgetRegistry.shared.registeredTypes[placement.widgetTypeID]
                     let color = widgetColors[index % widgetColors.count]
 
-                    // Use snapped position/size during drag/resize, actual placement otherwise
-                    let col = isDragging ? (dragSnappedCol ?? placement.column) : placement.column
-                    let row = isDragging ? (dragSnappedRow ?? placement.row) : placement.row
-                    let colSpan = isResizing ? (resizeSnappedCols ?? placement.columnSpan) : placement.columnSpan
-                    let rowSpan = isResizing ? (resizeSnappedRows ?? placement.rowSpan) : placement.rowSpan
+                    // Always use the stored (cell-based) placement for base position/size.
+                    // During a drag/resize, add the raw pixel offset so the widget tracks the
+                    // mouse smoothly. Snap-to-grid only happens on release (onEnded).
+                    let colSpanF = CGFloat(placement.columnSpan)
+                    let rowSpanF = CGFloat(placement.rowSpan)
+                    let colF = CGFloat(placement.column)
+                    let rowF = CGFloat(placement.row)
+                    let baseW: CGFloat = colSpanF * cellW + (colSpanF - 1) * gap
+                    let baseH: CGFloat = rowSpanF * cellH + (rowSpanF - 1) * gap
+                    let baseX: CGFloat = colF * (cellW + gap)
+                    let baseY: CGFloat = rowF * (cellH + gap)
 
-                    let w = CGFloat(colSpan) * cellW + CGFloat(colSpan - 1) * gap
-                    let h = CGFloat(rowSpan) * cellH + CGFloat(rowSpan - 1) * gap
-                    let x = CGFloat(col) * (cellW + gap)
-                    let y = CGFloat(row) * (cellH + gap)
+                    let w: CGFloat = isResizing ? max(cellW, baseW + resizeDelta.width) : baseW
+                    let h: CGFloat = isResizing ? max(cellH, baseH + resizeDelta.height) : baseH
+                    let x: CGFloat = isDragging ? baseX + dragOffset.width : baseX
+                    let y: CGFloat = isDragging ? baseY + dragOffset.height : baseY
 
                     ZStack {
                         RoundedRectangle(cornerRadius: 5)
@@ -1015,7 +1024,13 @@ struct InteractiveGridEditor: View {
                         }
                         .foregroundColor(isSelected ? .white : .primary)
 
-                        // Resize handle (bottom-right corner)
+                        // Resize handle — only the 18x18 corner icon is interactive.
+                        // The gesture sits on the Image itself (not the surrounding VStack)
+                        // so the body-drag stays usable when the user clicks anywhere except
+                        // the handle. Both this gesture and the body's drag use
+                        // .highPriorityGesture; SwiftUI's child-wins-over-parent rule for
+                        // same-priority gestures means the handle wins when the click lands
+                        // inside its 18x18 hit area.
                         if isSelected {
                             VStack {
                                 Spacer()
@@ -1027,80 +1042,121 @@ struct InteractiveGridEditor: View {
                                         .frame(width: 18, height: 18)
                                         .background(color.opacity(0.8))
                                         .clipShape(RoundedRectangle(cornerRadius: 3))
-                                        .gesture(
-                                            DragGesture()
+                                        .contentShape(Rectangle())
+                                        .highPriorityGesture(
+                                            DragGesture(minimumDistance: 1, coordinateSpace: .local)
                                                 .onChanged { value in
-                                                    resizingWidgetID = placement.id
-                                                    let newCols = max(1, min(
-                                                        layout.columns - placement.column,
-                                                        placement.columnSpan + Int((value.translation.width / (cellW + gap)).rounded())
-                                                    ))
-                                                    let newRows = max(1, min(
-                                                        layout.rows - placement.row,
-                                                        placement.rowSpan + Int((value.translation.height / (cellH + gap)).rounded())
-                                                    ))
-                                                    resizeSnappedCols = newCols
-                                                    resizeSnappedRows = newRows
-                                                }
-                                                .onEnded { _ in
-                                                    if let cols = resizeSnappedCols, let rows = resizeSnappedRows {
-                                                        var p = placement
-                                                        p.columnSpan = cols
-                                                        p.rowSpan = rows
-                                                        layoutManager.updateWidget(p)
+                                                    if resizingWidgetID != placement.id {
+                                                        var t = Transaction()
+                                                        t.disablesAnimations = true
+                                                        withTransaction(t) {
+                                                            resizingWidgetID = placement.id
+                                                            resizeDelta = value.translation
+                                                        }
+                                                    } else {
+                                                        resizeDelta = value.translation
                                                     }
+                                                }
+                                                .onEnded { value in
+                                                    let cellStep: CGFloat = cellW + gap
+                                                    let cellStepH: CGFloat = cellH + gap
+                                                    let deltaColF: CGFloat = value.translation.width / cellStep
+                                                    let deltaRowF: CGFloat = value.translation.height / cellStepH
+                                                    let rawCols: CGFloat = CGFloat(placement.columnSpan) + deltaColF
+                                                    let rawRows: CGFloat = CGFloat(placement.rowSpan) + deltaRowF
+                                                    let maxCols: Int = layout.columns - placement.column
+                                                    let maxRows: Int = layout.rows - placement.row
+                                                    let newCols: Int = max(1, min(maxCols, Int(rawCols.rounded())))
+                                                    let newRows: Int = max(1, min(maxRows, Int(rawRows.rounded())))
+                                                    var p = placement
+                                                    p.columnSpan = newCols
+                                                    p.rowSpan = newRows
+                                                    layoutManager.updateWidget(p)
                                                     resizingWidgetID = nil
-                                                    resizeSnappedCols = nil
-                                                    resizeSnappedRows = nil
+                                                    resizeDelta = .zero
                                                 }
                                         )
                                 }
                             }
                             .padding(2)
+                            .allowsHitTesting(true)
                         }
                     }
                     .frame(width: w, height: h)
                     .offset(x: x, y: y)
-                    // Only animate snapping when NOT actively dragging/resizing.
-                    // During active gestures, move instantly to avoid jitter from
-                    // overlapping animations fighting each other.
-                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: col)
-                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: row)
-                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: colSpan)
-                    .animation(isDragging || isResizing ? nil : .easeOut(duration: 0.15), value: rowSpan)
+                    // Suppress all animation during active drag/resize: use Transaction
+                    // to hard-cut every frame. The animation modifiers below only apply
+                    // when the gesture is idle, giving the snap-to-grid landing spring.
+                    // NOTE: .animation(_:value:) evaluates the condition at *render time*,
+                    // so it can lag one frame on gesture start. The withTransaction call
+                    // in onChanged prevents that first animated frame for both w/h and x/y.
+                    .transaction { t in
+                        if isActive { t.animation = nil }
+                    }
+                    .animation(.easeOut(duration: 0.15), value: x)
+                    .animation(.easeOut(duration: 0.15), value: y)
+                    .animation(.easeOut(duration: 0.15), value: w)
+                    .animation(.easeOut(duration: 0.15), value: h)
                     .zIndex(isDragging || isSelected ? 10 : 0)
                     .opacity(isDragging ? 0.8 : 1.0)
-                    .onTapGesture {
-                        selectedWidgetID = placement.id
-                    }
-                    .gesture(
-                        DragGesture()
+                    // Use .simultaneousGesture for the tap so it does NOT delay the
+                    // drag recogniser. With plain .onTapGesture followed by .gesture,
+                    // SwiftUI on macOS makes the drag wait for the tap deadline (~0.3s)
+                    // before recognising — the mouse has already moved during that wait,
+                    // so the first onChanged fires with a large accumulated translation
+                    // that causes a visible jump.
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            selectedWidgetID = placement.id
+                        }
+                    )
+                    // highPriorityGesture: drag wins over the tap gesture so it starts
+                    // tracking immediately without waiting for tap disambiguation.
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 3)
                             .onChanged { value in
-                                if resizingWidgetID == nil {
-                                    draggingWidgetID = placement.id
-                                    selectedWidgetID = placement.id
-                                    let newCol = max(0, min(
-                                        layout.columns - placement.columnSpan,
-                                        placement.column + Int((value.translation.width / (cellW + gap)).rounded())
-                                    ))
-                                    let newRow = max(0, min(
-                                        layout.rows - placement.rowSpan,
-                                        placement.row + Int((value.translation.height / (cellH + gap)).rounded())
-                                    ))
-                                    dragSnappedCol = newCol
-                                    dragSnappedRow = newRow
+                                // DIAGNOSTIC — remove once confirmed working:
+                                // print("BODY onChanged: translation=\(value.translation), resizingID=\(String(describing: resizingWidgetID))")
+
+                                // Ignore body-drag events when a resize is in progress
+                                // (the resize handle sits inside the widget frame).
+                                guard resizingWidgetID == nil else { return }
+                                if draggingWidgetID != placement.id {
+                                    // First event: atomically set ID + offset with animation
+                                    // disabled so there is no single eased frame at start.
+                                    var t = Transaction()
+                                    t.disablesAnimations = true
+                                    withTransaction(t) {
+                                        draggingWidgetID = placement.id
+                                        selectedWidgetID = placement.id
+                                        dragOffset = value.translation
+                                    }
+                                } else {
+                                    dragOffset = value.translation
                                 }
                             }
-                            .onEnded { _ in
-                                if let col = dragSnappedCol, let row = dragSnappedRow {
-                                    var p = placement
-                                    p.column = col
-                                    p.row = row
-                                    layoutManager.updateWidget(p)
-                                }
+                            .onEnded { value in
+                                // DIAGNOSTIC — remove once confirmed working:
+                                // print("BODY onEnded: translation=\(value.translation)")
+
+                                guard resizingWidgetID == nil else { return }
+                                // Snap on release: find the nearest grid cell for the widget origin.
+                                let cellStep: CGFloat = cellW + gap
+                                let cellStepH: CGFloat = cellH + gap
+                                let deltaColF: CGFloat = value.translation.width / cellStep
+                                let deltaRowF: CGFloat = value.translation.height / cellStepH
+                                let rawCol: CGFloat = CGFloat(placement.column) + deltaColF
+                                let rawRow: CGFloat = CGFloat(placement.row) + deltaRowF
+                                let maxCol: Int = layout.columns - placement.columnSpan
+                                let maxRow: Int = layout.rows - placement.rowSpan
+                                let newCol: Int = max(0, min(maxCol, Int(rawCol.rounded())))
+                                let newRow: Int = max(0, min(maxRow, Int(rawRow.rounded())))
+                                var p = placement
+                                p.column = newCol
+                                p.row = newRow
+                                layoutManager.updateWidget(p)
                                 draggingWidgetID = nil
-                                dragSnappedCol = nil
-                                dragSnappedRow = nil
+                                dragOffset = .zero
                             }
                     )
                 }

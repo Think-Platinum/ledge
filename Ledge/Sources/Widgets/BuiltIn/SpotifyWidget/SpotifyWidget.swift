@@ -25,7 +25,7 @@ struct SpotifyWidget {
         var showAlbumArt: Bool = true
         var showProgressBar: Bool = true
         var albumArtStyle: AlbumArtStyle = .edgeFade
-        var showSkipButtons: Bool = true
+        var showSkipButtons: Bool = false
         var useWebAPI: Bool = false
         var spotifyClientID: String = ""
 
@@ -36,7 +36,7 @@ struct SpotifyWidget {
 
         init() {}
 
-        init(showAlbumArt: Bool = true, showProgressBar: Bool = true, albumArtStyle: AlbumArtStyle = .edgeFade, showSkipButtons: Bool = true, useWebAPI: Bool = false, spotifyClientID: String = "") {
+        init(showAlbumArt: Bool = true, showProgressBar: Bool = true, albumArtStyle: AlbumArtStyle = .edgeFade, showSkipButtons: Bool = false, useWebAPI: Bool = false, spotifyClientID: String = "") {
             self.showAlbumArt = showAlbumArt
             self.showProgressBar = showProgressBar
             self.albumArtStyle = albumArtStyle
@@ -49,7 +49,7 @@ struct SpotifyWidget {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             showAlbumArt = try container.decodeIfPresent(Bool.self, forKey: .showAlbumArt) ?? true
             showProgressBar = try container.decodeIfPresent(Bool.self, forKey: .showProgressBar) ?? true
-            showSkipButtons = try container.decodeIfPresent(Bool.self, forKey: .showSkipButtons) ?? true
+            showSkipButtons = try container.decodeIfPresent(Bool.self, forKey: .showSkipButtons) ?? false
             useWebAPI = try container.decodeIfPresent(Bool.self, forKey: .useWebAPI) ?? false
             spotifyClientID = try container.decodeIfPresent(String.self, forKey: .spotifyClientID) ?? ""
 
@@ -176,15 +176,20 @@ struct SpotifyWidgetView: View {
     private var nowPlayingView: some View {
         GeometryReader { geometry in
             let h = geometry.size.height
+            let w = geometry.size.width
 
             ZStack {
                 // Radial album colour glow — radiates from the album art position
                 albumArtBackground(size: geometry.size)
                     .opacity(backgroundOpacity)
 
-                if h < 150 {
+                // Tier routing branches on both dimensions: a short *or* narrow
+                // widget drops to the next-smaller tier. Height-only routing
+                // never fired the smaller tiers on the Xeneon Edge (720pt tall
+                // means even a 1-row widget exceeds the old 280pt threshold).
+                if h < 150 || w < 500 {
                     ultraCompactLayout(size: geometry.size)
-                } else if h < 280 {
+                } else if h < 280 || w < 800 {
                     compactLayout(size: geometry.size)
                 } else {
                     fullLayout(size: geometry.size)
@@ -321,6 +326,17 @@ struct SpotifyWidgetView: View {
     @ViewBuilder
     private func compactLayout(size: CGSize) -> some View {
         let artSize = size.height - 20
+        // Mirror the HStack geometry: outer .padding(.horizontal, 10) = 20pt total,
+        // art column = artSize, HStack spacing = 12, plus 8pt trailing breathing
+        // room reserved for the slider thumb so it never sits flush against the
+        // widget's clipped edge. That's the budget the controls row must fit within.
+        let controlsTrailingInset: CGFloat = 8
+        let controlsWidth = size.width - 20 - artSize - 12 - controlsTrailingInset
+
+        #if DEBUG
+        let _ = print(String(format: "[SpotifyWidget][compact] size=%.1fx%.1f artSize=%.1f controlsWidth=%.1f skipON=%@",
+                             size.width, size.height, artSize, controlsWidth, config.showSkipButtons ? "true" : "false"))
+        #endif
 
         HStack(spacing: 12) {
             // Album art
@@ -362,9 +378,11 @@ struct SpotifyWidgetView: View {
                     progressBar(barHeight: 6, timeFont: .system(size: 11, design: .monospaced))
                 }
 
-                // Controls + volume
-                compactControls
+                // Controls + volume — pass the precomputed width so the tier
+                // degradation inside can prevent the row from overflowing.
+                compactControls(availableWidth: controlsWidth)
                     .padding(.top, 4)
+                    .padding(.trailing, controlsTrailingInset)
 
                 Spacer(minLength: 0)
             }
@@ -373,12 +391,77 @@ struct SpotifyWidgetView: View {
         .padding(.vertical, 10)
     }
 
-    private var compactControls: some View {
-        HStack(spacing: 0) {
-            Spacer()
+    // MARK: - Compact Controls
+    //
+    // Mirrors fullControlsRow's tier-degradation approach, scaled for compact widgets.
+    //
+    // Width budgets:
+    //   Cluster skip ON:  5×48 + 4×20 = 320pt
+    //   Cluster skip OFF: 3×48 + 2×20 = 184pt
+    //
+    //   Vol group widths (compact — shorter slider than full layout):
+    //     cT1: icon(14) + 5 + slider(45) + 5 + launch(48) = 117pt  [full]
+    //     cT2: icon(14) + 5 + slider(45)                  =  64pt  [slider, no launch]
+    //     cT3: icon-button(48)                             =  48pt  [icon-only, popover]
+    //
+    //   Min row width = 2 × volGroupWidth + clusterWidth
+    //   cT1 threshold ON:  2×117 + 320 = 554pt
+    //   cT2 threshold ON:  2×64  + 320 = 448pt
+    //   cT3 threshold ON:  2×48  + 320 = 416pt
+    //   cT4 (no vol)    :         320pt
+    //
+    // For the default layout (628×227pt widget, controlsWidth ≈ 389pt, skip ON):
+    //   389 < 416 → cT4 fires (no volume shown). The cluster (320pt) fits cleanly
+    //   with the two Spacers sharing the remaining ~69pt of breathing room.
+    //
+    // The ghost-mirror leading spacer keeps the cluster on the true midpoint.
 
-            // Centered playback controls
-            HStack(spacing: 20) {
+    @State private var showCompactVolumePopover = false
+
+    private func compactControls(availableWidth: CGFloat) -> some View {
+        let buttonWidth: CGFloat  = 48
+        let spacing: CGFloat      = 20
+        let buttonCount: CGFloat  = config.showSkipButtons ? 5 : 3
+        let gapCount: CGFloat     = buttonCount - 1
+
+        let clusterWidth = buttonCount * buttonWidth + gapCount * spacing
+
+        let cVolFull:   CGFloat = 117   // icon + slider(45) + launch
+        let cVolSlider: CGFloat = 64    // icon + slider(45), no launch
+        let cVolIcon:   CGFloat = 48    // icon-only popover
+
+        let cT1 = 2 * cVolFull   + clusterWidth
+        let cT2 = 2 * cVolSlider + clusterWidth
+        let cT3 = 2 * cVolIcon   + clusterWidth
+
+        let useFullVolume = availableWidth >= cT1
+        let useSliderVol  = !useFullVolume  && availableWidth >= cT2
+        let useIconVol    = !useSliderVol   && availableWidth >= cT3
+        // cT4 / no-volume: everything else (cluster always fits when availableWidth >= clusterWidth)
+
+        #if DEBUG
+        let _tier = useFullVolume ? "cT1-full" : useSliderVol ? "cT2-slider" : useIconVol ? "cT3-icon" : "cT4-noVol"
+        let _ = print(String(format: "[SpotifyWidget][compactControls] available=%.1f tier=%@ cT1=%.0f cT2=%.0f cT3=%.0f cluster=%.0f",
+                             availableWidth, _tier, cT1, cT2, cT3, clusterWidth))
+        #endif
+
+        let resolvedVolWidth: CGFloat = {
+            if useFullVolume  { return cVolFull   }
+            if useSliderVol   { return cVolSlider }
+            if useIconVol     { return cVolIcon   }
+            return 0
+        }()
+
+        return HStack(spacing: 0) {
+            // Ghost mirror — invisible leading balance weight
+            if resolvedVolWidth > 0 {
+                Color.clear.frame(width: resolvedVolWidth)
+            }
+
+            Spacer(minLength: 0)
+
+            // Centred playback cluster
+            HStack(spacing: spacing) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 18))
                         .frame(minWidth: 48, minHeight: 48)
@@ -418,34 +501,94 @@ struct SpotifyWidgetView: View {
             .foregroundStyle(.white)
             .buttonStyle(.plain)
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            // Volume + Spotify link — right-aligned
-            HStack(spacing: 5) {
-                Image(systemName: volumeIcon)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.35))
-                Slider(
-                    value: Binding(
-                        get: { Double(state.volume) },
-                        set: { state.volume = Int($0); doSetVolume(Int($0)) }
-                    ),
-                    in: 0...100
-                )
-                .frame(width: 55)
-                .tint(.green)
-                .controlSize(.mini)
-
-                Button { bridge.activateSpotify() } label: {
-                    Image(systemName: "arrow.up.forward.square")
-                        .font(.system(size: 12))
+            // Trailing volume group at the tier-appropriate width.
+            // .frame(width: 14) on the icon anchors it to the same 14pt assumed
+            // in the cVolFull/cVolSlider constants so the outer .frame(width:) is exact.
+            if useFullVolume {
+                HStack(spacing: 5) {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.35))
+                        .frame(width: 14)
+                    Slider(
+                        value: Binding(
+                            get: { Double(state.volume) },
+                            set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                        ),
+                        in: 0...100
+                    )
+                    .frame(width: 45)
+                    .tint(.green)
+                    .controlSize(.mini)
+                    Button { bridge.activateSpotify() } label: {
+                        Image(systemName: "arrow.up.forward.square")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .frame(minWidth: 48, minHeight: 48)
+                            .contentShape(Rectangle())
+                            .debugTouchSurface()
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(width: cVolFull, alignment: .trailing)
+
+            } else if useSliderVol {
+                HStack(spacing: 5) {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(width: 14)
+                    Slider(
+                        value: Binding(
+                            get: { Double(state.volume) },
+                            set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                        ),
+                        in: 0...100
+                    )
+                    .frame(width: 45)
+                    .tint(.green)
+                    .controlSize(.mini)
+                }
+                .frame(width: cVolSlider, alignment: .trailing)
+
+            } else if useIconVol {
+                Button {
+                    showCompactVolumePopover.toggle()
+                } label: {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.55))
                         .frame(minWidth: 48, minHeight: 48)
                         .contentShape(Rectangle())
                         .debugTouchSurface()
                 }
                 .buttonStyle(.plain)
+                .popover(isPresented: $showCompactVolumePopover, arrowEdge: .bottom) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "speaker.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Slider(
+                            value: Binding(
+                                get: { Double(state.volume) },
+                                set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                            ),
+                            in: 0...100
+                        )
+                        .frame(width: 120)
+                        .tint(.green)
+                        .controlSize(.mini)
+                        Image(systemName: "speaker.wave.3.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                }
+                .frame(width: cVolIcon, alignment: .trailing)
             }
+            // cT4: no volume group rendered
         }
     }
 
@@ -461,14 +604,16 @@ struct SpotifyWidgetView: View {
     // │ └──────────┘                                                │
     // └─────────────────────────────────────────────────────────────┘
 
-    /// Volume popover state for collapsible volume control.
-    @State private var showVolumeOverlay = false
-
     @ViewBuilder
     private func fullLayout(size: CGSize) -> some View {
         let artSize = size.height - 24
-        let controlsWidth = size.width - artSize - 12 - 16 // art + leading pad + trailing pad
         let isExtraLarge = size.height >= 400
+
+        #if DEBUG
+        let _fullCtrlW = size.width - artSize - 12 - 32
+        let _ = print(String(format: "[SpotifyWidget][full] size=%.1fx%.1f artSize=%.1f controlsWidth=%.1f skipON=%@",
+                             size.width, size.height, artSize, _fullCtrlW, config.showSkipButtons ? "true" : "false"))
+        #endif
 
         // Scale track info fonts for very large widgets
         let trackFontSize: CGFloat = isExtraLarge ? min(size.height * 0.08, 44) : 28
@@ -518,7 +663,11 @@ struct SpotifyWidgetView: View {
                     progressBar(barHeight: 8, timeFont: .system(size: 12, design: .monospaced))
                 }
 
-                // Controls — collapsible volume when space is tight
+                // Compute the available width for the controls row.
+                // Subtract: art column (artSize + 12pt leading pad) + this VStack's
+                // own horizontal padding (16pt each side = 32pt).
+                let controlsWidth = size.width - artSize - 12 - 32
+
                 fullControlsRow(availableWidth: controlsWidth)
                     .padding(.top, 6)
                     .padding(.bottom, 4)
@@ -576,15 +725,87 @@ struct SpotifyWidgetView: View {
     }
 
     // MARK: - Full Controls
+    //
+    // The controls row degrades gracefully when the available width is too narrow
+    // to fit the playback cluster plus the volume group. Degradation order:
+    //
+    //   Tier 1 — Full volume (icon + slider + launch button)
+    //   Tier 2 — No launch button (icon + slider only)
+    //   Tier 3 — Icon-only volume (tap opens popover slider)
+    //   Tier 4 — No volume at all
+    //   Tier 5 — No volume + tighter button spacing (24 → 16pt)  [last resort]
+    //
+    // The ghost-mirror leading spacer always matches the trailing volume group
+    // width so the cluster stays on the true midpoint of the row.
+    //
+    // Width budgets (button touch targets = 48pt min, spacing = 24pt):
+    //   Cluster (skip ON):  5×48 + 4×24 = 336pt
+    //   Cluster (skip OFF): 3×48 + 2×24 = 192pt
+    //
+    //   Tier 1 vol group:  icon(14) + 6 + slider(70) + 6 + launch(48) = 144pt
+    //   Tier 2 vol group:  icon(14) + 6 + slider(70) = 90pt
+    //   Tier 3 vol group:  icon-button(48) = 48pt
+    //
+    //   Min row width = 2 × volGroupWidth + clusterWidth
+    //   Tier 1 threshold ON:  2×144 + 336 = 624pt
+    //   Tier 2 threshold ON:  2×90  + 336 = 516pt
+    //   Tier 3 threshold ON:  2×48  + 336 = 432pt
+    //   Tier 4 threshold ON:  0     + 336 = 336pt  (no ghost needed either)
+    //   Tier 5 threshold ON:  5×48  + 4×16 = 304pt (always fits in fullLayout)
 
-    private func fullControlsRow(availableWidth: CGFloat = 400) -> some View {
-        let collapseVolume = availableWidth < 130
+    // State for the icon-only volume popover (Tier 3)
+    @State private var showVolumePopover = false
+
+    private func fullControlsRow(availableWidth: CGFloat) -> some View {
+        // Determine cluster width for threshold math
+        let buttonWidth: CGFloat  = 48
+        let spacing: CGFloat      = 24
+        let tightSpacing: CGFloat = 16
+        let buttonCount: CGFloat  = config.showSkipButtons ? 5 : 3
+        let gapCount: CGFloat     = buttonCount - 1
+
+        let clusterWidth     = buttonCount * buttonWidth + gapCount * spacing
+        let clusterWidthTight = buttonCount * buttonWidth + gapCount * tightSpacing
+
+        // Volume group widths for each tier
+        let volFull: CGFloat  = 144   // icon + slider + launch
+        let volSlider: CGFloat = 90   // icon + slider (no launch)
+        let volIcon: CGFloat  = 48    // icon-only touch target
+
+        // Tier thresholds: 2 × volGroupWidth + clusterWidth must fit in availableWidth
+        let t1 = 2 * volFull   + clusterWidth       // full volume with launch
+        let t2 = 2 * volSlider + clusterWidth       // slider, no launch
+        let t3 = 2 * volIcon   + clusterWidth       // icon-only volume
+        let t4 = clusterWidth                        // no volume
+        // t5 uses tight spacing — check against clusterWidthTight
+
+        // Pick the tier
+        let useFullVolume   = availableWidth >= t1
+        let useSliderVol    = !useFullVolume  && availableWidth >= t2
+        let useIconVol      = !useSliderVol   && availableWidth >= t3
+        let useNoVolume     = !useIconVol     && availableWidth >= t4
+        let useTightSpacing = !useNoVolume    && availableWidth >= clusterWidthTight
+
+        // Resolved vol group width for the ghost mirror
+        let resolvedVolWidth: CGFloat = {
+            if useFullVolume  { return volFull   }
+            if useSliderVol   { return volSlider }
+            if useIconVol     { return volIcon   }
+            return 0
+        }()
+
+        let resolvedSpacing: CGFloat = useTightSpacing ? tightSpacing : spacing
 
         return HStack(spacing: 0) {
-            Spacer()
+            // Ghost mirror — invisible balance weight on the leading side
+            if resolvedVolWidth > 0 {
+                Color.clear.frame(width: resolvedVolWidth)
+            }
 
-            // Centered playback controls
-            HStack(spacing: 24) {
+            Spacer(minLength: 0)
+
+            // Centred playback cluster
+            HStack(spacing: resolvedSpacing) {
                 Button { doPreviousTrack() } label: {
                     Image(systemName: "backward.fill").font(.system(size: 22))
                         .frame(minWidth: 48, minHeight: 48)
@@ -624,56 +845,11 @@ struct SpotifyWidgetView: View {
             .foregroundStyle(.white)
             .buttonStyle(.plain)
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            if collapseVolume {
-                // Collapsed: speaker icon → overlay slider
-                Button {
-                    showVolumeOverlay.toggle()
-                } label: {
-                    Image(systemName: volumeIcon)
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(minWidth: 48, minHeight: 48)
-                        .contentShape(Rectangle())
-                        .debugTouchSurface()
-                }
-                .buttonStyle(.plain)
-                .overlay(alignment: .top) {
-                    if showVolumeOverlay {
-                        VStack(spacing: 4) {
-                            Slider(
-                                value: Binding(
-                                    get: { Double(state.volume) },
-                                    set: { state.volume = Int($0); doSetVolume(Int($0)) }
-                                ),
-                                in: 0...100
-                            )
-                            .frame(width: 100)
-                            .tint(.green)
-                            .controlSize(.mini)
-                            Text("\(state.volume)%")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .padding(8)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .offset(y: -56)
-                    }
-                }
-
-                Button { bridge.activateSpotify() } label: {
-                    Image(systemName: "arrow.up.forward.square")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .frame(minWidth: 48, minHeight: 48)
-                        .contentShape(Rectangle())
-                        .debugTouchSurface()
-                }
-                .buttonStyle(.plain)
-            } else {
-                // Inline volume slider
+            // Trailing volume group — rendered at the tier-appropriate width
+            if useFullVolume {
+                // Tier 1: icon + slider + launch button
                 HStack(spacing: 6) {
                     Image(systemName: volumeIcon)
                         .font(.system(size: 13))
@@ -700,7 +876,66 @@ struct SpotifyWidgetView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                .frame(width: volFull, alignment: .trailing)
+
+            } else if useSliderVol {
+                // Tier 2: icon + slider (launch button dropped)
+                HStack(spacing: 6) {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .frame(width: 14)
+                    Slider(
+                        value: Binding(
+                            get: { Double(state.volume) },
+                            set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                        ),
+                        in: 0...100
+                    )
+                    .frame(width: 70)
+                    .tint(.green)
+                    .controlSize(.mini)
+                }
+                .frame(width: volSlider, alignment: .trailing)
+
+            } else if useIconVol {
+                // Tier 3: icon-only — tap reveals a popover slider
+                Button {
+                    showVolumePopover.toggle()
+                } label: {
+                    Image(systemName: volumeIcon)
+                        .font(.system(size: 16))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(minWidth: 48, minHeight: 48)
+                        .contentShape(Rectangle())
+                        .debugTouchSurface()
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showVolumePopover, arrowEdge: .bottom) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "speaker.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Slider(
+                            value: Binding(
+                                get: { Double(state.volume) },
+                                set: { state.volume = Int($0); doSetVolume(Int($0)) }
+                            ),
+                            in: 0...100
+                        )
+                        .frame(width: 120)
+                        .tint(.green)
+                        .controlSize(.mini)
+                        Image(systemName: "speaker.wave.3.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                }
+                .frame(width: volIcon, alignment: .trailing)
+
             }
+            // Tier 4 / Tier 5: no volume group rendered at all
         }
     }
 
