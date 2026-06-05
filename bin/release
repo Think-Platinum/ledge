@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#
+# bin/release - build a notarised, Developer ID-signed Ledge.dmg for public
+# distribution. This is SEPARATE from bin/ship (the fast local self-signed
+# loop). Unlike bin/ship, this script NEVER touches /Applications and NEVER
+# relaunches Ledge - it only archives, signs, packages, and notarises.
+#
+# Pipeline:
+#   archive (Developer ID + Hardened Runtime + entitlements)
+#     -> export -> package .dmg -> sign .dmg -> notarise -> staple -> verify
+#
+# Distribution signing settings are passed as xcodebuild OVERRIDES so the
+# project's Debug/Release build configs and bin/ship's self-signed flow stay
+# completely untouched (same pattern bin/ship uses for its identity override).
+#
+# Notary credentials (for the submit step) are read one of three ways, in order:
+#   1. NOTARY_PROFILE  - a notarytool keychain profile name. Set up once:
+#        xcrun notarytool store-credentials ledge-notary \
+#          --apple-id <apple-id> --team-id 53NW8Q45VL --password <app-specific-pw>
+#   2. NOTARY_API_KEY_ID + NOTARY_API_ISSUER + NOTARY_API_KEY_PATH
+#        - App Store Connect API key (recommended for CI / #195).
+#   3. NOTARY_APPLE_ID + NOTARY_PASSWORD (app-specific) [+ NOTARY_TEAM_ID]
+# If none are set, build + sign + .dmg still run and notarisation is skipped
+# with instructions printed - so you can verify signing before wiring creds.
+
+set -euo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SCHEME="Ledge"
+readonly PROJECT="Ledge.xcodeproj"
+readonly CONFIGURATION="Release"
+readonly BUNDLE_ID="com.thinkplatinum.Ledge"
+readonly TEAM_ID="${LEDGE_TEAM_ID:-53NW8Q45VL}"
+readonly SIGN_IDENTITY="${LEDGE_DEVID_IDENTITY:-Developer ID Application: Think Platinum Ltd (53NW8Q45VL)}"
+readonly ENTITLEMENTS="$REPO_ROOT/Ledge/Ledge.entitlements"
+readonly EXPORT_OPTIONS="$REPO_ROOT/ExportOptions.plist"
+readonly OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/release}"
+readonly ARCHIVE_PATH="$OUT_DIR/Ledge.xcarchive"
+readonly EXPORT_DIR="$OUT_DIR/export"
+readonly APP_NAME="Ledge.app"
+
+cd "$REPO_ROOT"
+
+echo "-> Ledge release build"
+echo "   Identity: ${SIGN_IDENTITY}"
+echo "   Team:     ${TEAM_ID}"
+
+# --- 1. Verify the Developer ID identity is present --------------------------
+if ! security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+    echo "error: Developer ID signing identity not found in keychain:" >&2
+    echo "  $SIGN_IDENTITY" >&2
+    echo "Create it: Xcode > Settings > Accounts > (team) > Manage Certificates > + Developer ID Application." >&2
+    exit 1
+fi
+
+# --- 2. Clean output --------------------------------------------------------
+rm -rf "$OUT_DIR"
+mkdir -p "$OUT_DIR"
+
+# --- 3. Archive (Developer ID, Hardened Runtime, entitlements) --------------
+echo "-> Archiving..."
+xcodebuild archive \
+    -project "$PROJECT" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    -destination 'generic/platform=macOS' \
+    -archivePath "$ARCHIVE_PATH" \
+    CODE_SIGN_STYLE=Manual \
+    DEVELOPMENT_TEAM="$TEAM_ID" \
+    CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+    CODE_SIGN_ENTITLEMENTS="$ENTITLEMENTS" \
+    ENABLE_HARDENED_RUNTIME=YES \
+    OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime" \
+    -quiet
+
+# --- 4. Export the Developer ID-signed .app ---------------------------------
+echo "-> Exporting..."
+xcodebuild -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportOptionsPlist "$EXPORT_OPTIONS" \
+    -exportPath "$EXPORT_DIR" \
+    -quiet
+
+APP_PATH="$EXPORT_DIR/$APP_NAME"
+if [[ ! -d "$APP_PATH" ]]; then
+    echo "error: export did not produce $APP_PATH" >&2
+    exit 1
+fi
+
+# --- 4b. Re-sign with the Hardened Runtime ----------------------------------
+# `xcodebuild -exportArchive` re-signs the app and drops the Hardened Runtime
+# flag, which notarisation requires. Re-apply it explicitly. There are no
+# bundled third-party frameworks, so a single bundle re-sign is sufficient
+# (no inside-out signing needed).
+echo "-> Re-signing with the Hardened Runtime..."
+codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" \
+    "$APP_PATH"
+
+# --- 5. Verify signature + hardened runtime ---------------------------------
+echo "-> Verifying signature..."
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+if codesign -dvvv "$APP_PATH" 2>&1 | grep -q 'flags=.*runtime'; then
+    echo "   Hardened Runtime: enabled"
+else
+    echo "warning: Hardened Runtime flag not detected on the exported app" >&2
+fi
+codesign -dvv "$APP_PATH" 2>&1 | grep -E 'Authority=|TeamIdentifier=|Identifier=' || true
+
+# --- 6. Package .dmg --------------------------------------------------------
+# Version comes from the built app's CFBundleShortVersionString (the binary's
+# own truth), not a separate VERSION file.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
+DMG_PATH="$OUT_DIR/Ledge-${VERSION}.dmg"
+echo "-> Packaging $(basename "$DMG_PATH")..."
+DMG_STAGE="$OUT_DIR/dmg"
+rm -rf "$DMG_STAGE"; mkdir -p "$DMG_STAGE"
+cp -R "$APP_PATH" "$DMG_STAGE/"
+ln -s /Applications "$DMG_STAGE/Applications"
+hdiutil create -volname "Ledge ${VERSION}" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
+codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+
+# --- 7. Notarise ------------------------------------------------------------
+notary_submit() {
+    if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+        xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+    elif [[ -n "${NOTARY_API_KEY_ID:-}" && -n "${NOTARY_API_ISSUER:-}" && -n "${NOTARY_API_KEY_PATH:-}" ]]; then
+        xcrun notarytool submit "$DMG_PATH" --key "$NOTARY_API_KEY_PATH" \
+            --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER" --wait
+    elif [[ -n "${NOTARY_APPLE_ID:-}" && -n "${NOTARY_PASSWORD:-}" ]]; then
+        xcrun notarytool submit "$DMG_PATH" --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" --team-id "${NOTARY_TEAM_ID:-$TEAM_ID}" --wait
+    else
+        return 2
+    fi
+}
+
+echo "-> Notarising..."
+if notary_submit; then
+    echo "-> Stapling..."
+    xcrun stapler staple "$DMG_PATH"
+    echo "-> Gatekeeper assessment:"
+    spctl -a -t open --context context:primary-signature -vvv "$DMG_PATH" || true
+    echo ""
+    echo "OK notarised, stapled release: $DMG_PATH"
+else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then
+        cat <<EOF
+
+WARNING: build + sign + .dmg complete, but notarisation was SKIPPED - no notary
+  credentials configured. The signed (un-notarised) dmg is at:
+    $DMG_PATH
+
+  Set up credentials once, then re-run. Keychain profile (simplest):
+    xcrun notarytool store-credentials ledge-notary \\
+      --apple-id <your-apple-id> --team-id $TEAM_ID --password <app-specific-password>
+    NOTARY_PROFILE=ledge-notary bin/release
+
+  Or an App Store Connect API key (also what #195 will use in CI):
+    NOTARY_API_KEY_ID=... NOTARY_API_ISSUER=... NOTARY_API_KEY_PATH=AuthKey_XXX.p8 bin/release
+EOF
+        exit 0
+    fi
+    echo "error: notarisation failed" >&2
+    exit 1
+fi

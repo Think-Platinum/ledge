@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Ledge distribution entitlements (Developer ID + Hardened Runtime). See issue #194.
+
+      Policy:
+        - App Sandbox stays DISABLED (CGEventTap touch remapper + USB HID need it off).
+          The absence of com.apple.security.app-sandbox = sandbox off. Do NOT add it.
+        - Keep this MINIMAL. Do NOT add com.apple.security.cs.disable-library-validation
+          or com.apple.security.cs.allow-unsigned-executable-memory: there are no
+          third-party frameworks bundled, so neither is needed, and both broadly weaken
+          a non-sandboxed app that holds Accessibility.
+        - CGEventTap (TouchRemapper) and IOHIDManager are TCC-gated (Accessibility /
+          Input Monitoring), NOT entitlement-gated - no key here covers them.
+        - Each Hardened Runtime resource entitlement below maps to a capability the app
+          declares an Info.plist usage string for. If the first functional test of the
+          notarised build shows the app never exercises one of these, prune it.
+    -->
+
+    <!-- Required: the app drives Chrome (Google Meet) and Spotify via NSAppleScript /
+         Apple Events (AppleScriptQueue, GoogleMeetBridge, SpotifyBridge). Without this,
+         scripting other apps is blocked under the Hardened Runtime.
+         Backed by NSAppleEventsUsageDescription in Info.plist. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Calendar access. Backed by NSCalendarsFullAccessUsageDescription. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+
+    <!-- Location access. Backed by NSLocationWhenInUseUsageDescription. -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+
+    <!-- Camera access. Backed by NSCameraUsageDescription. -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+</dict>
+</plist>
